@@ -560,13 +560,16 @@ try:
         def get_fy(dt):
             return dt.year if dt.month <= 3 else dt.year + 1
 
+        # 4月始まりFYの四半期番号: Jun=Q1, Sep=Q2, Dec=Q3, Mar=Q4
+        FY_Q_MAP = {6: 1, 9: 2, 12: 3, 3: 4}
+
         labels, rev_vals, op_vals, ni_vals = [], [], [], []
         q_meta = []  # (label, fy, q_in_fy, op_val_raw, rev_val_raw, ni_val_raw)
 
         for col in cols:
             dt = pd.to_datetime(col)
             fy = get_fy(dt)
-            q_in_fy = ((dt.month - 1) // 3) % 4 + 1  # Q1〜Q4
+            q_in_fy = FY_Q_MAP.get(dt.month, ((dt.month - 1) // 3) % 4 + 1)
             label = f"FY{str(fy)[2:]} Q{q_in_fy}"
             labels.append(label)
 
