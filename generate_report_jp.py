@@ -244,6 +244,49 @@ except Exception as e:
     print(f"  [ERROR] eps_revisions: {e}")
     eps_rev = None
 
+# カレンダーイベント取得
+calendar_events = []  # list of {'date': str, 'label': str, 'color': str, 'impact': str, 'detail': str}
+try:
+    cal = ticker.calendar
+    if cal:
+        # 決算発表日
+        ed_list = cal.get('Earnings Date') or []
+        if not isinstance(ed_list, list):
+            ed_list = [ed_list]
+        rev_avg = cal.get('Revenue Average')
+        rev_lo  = cal.get('Revenue Low')
+        rev_hi  = cal.get('Revenue High')
+        rev_txt = ""
+        if rev_avg:
+            rev_txt = f"売上高コンセンサス: ¥{rev_avg/1e12:.2f}兆（¥{rev_lo/1e12:.2f}〜¥{rev_hi/1e12:.2f}兆）" if rev_lo and rev_hi else f"売上高コンセンサス: ¥{rev_avg/1e12:.2f}兆"
+        for ed in ed_list:
+            if ed:
+                calendar_events.append({
+                    'date': str(ed), 'label': '決算発表',
+                    'type': 'earnings', 'color': AC2,
+                    'impact': '±5〜15%', 'detail': rev_txt or '通期業績・ガイダンス発表'
+                })
+        # 配当落ち日
+        ex_div = cal.get('Ex-Dividend Date')
+        if ex_div:
+            dy_txt = f"配当 ¥{dividend_rate:,.0f}/株" if dividend_rate else "配当落ち"
+            calendar_events.append({
+                'date': str(ex_div), 'label': '配当落ち日',
+                'type': 'dividend', 'color': GR,
+                'impact': f'−{dividend_rate/cur_price*100:.1f}%' if (dividend_rate and cur_price) else '−配当相当',
+                'detail': dy_txt
+            })
+    # 直近の過去サプライズから決算インパクト推定
+    avg_surprise_abs = None
+    if earn_dates is not None and not earn_dates.empty:
+        past = earn_dates.dropna(subset=['Surprise(%)']) if 'Surprise(%)' in earn_dates.columns else pd.DataFrame()
+        if not past.empty:
+            avg_surprise_abs = float(past['Surprise(%)'].abs().mean())
+    calendar_events.sort(key=lambda e: e['date'])
+    print(f"  カレンダーイベント: {len(calendar_events)}件")
+except Exception as e:
+    print(f"  [WARN] calendar: {e}")
+
 # ─── OBV計算 ───
 obv = pd.Series(dtype=float)
 obv_ma20 = pd.Series(dtype=float)
@@ -1417,6 +1460,124 @@ except Exception as e:
     print(f"  [WARN] Chart 14 (matrix): {e}")
     traceback.print_exc()
 
+# ─── Chart 15: 3ヶ月株価予測（90日MC + イベント）───
+html_mc90 = ""
+mc90_table = []   # [(label, p10, p25, p50, p75, p90)]
+mc90_up10_prob = None
+try:
+    if len(close) > 30 and cur_price:
+        log_ret = np.log(close / close.shift(1)).dropna()
+        hv30    = float(log_ret.tail(30).std()) * math.sqrt(252)
+
+        if target_mean and cur_price:
+            annual_drift = math.log(target_mean / cur_price)
+        else:
+            annual_drift = float(log_ret.mean()) * 252
+
+        T90 = 90
+        dt_  = 1 / 252
+        S0   = cur_price
+        sigma = hv30
+        mu90  = annual_drift / 252
+        sig_dt90 = sigma * math.sqrt(dt_)
+
+        np.random.seed(42)
+        paths90 = np.zeros((N_SIM, T90 + 1))
+        paths90[:, 0] = S0
+        for step in range(1, T90 + 1):
+            z = np.random.standard_normal(N_SIM)
+            paths90[:, step] = paths90[:, step-1] * np.exp(
+                (mu90 - 0.5 * sigma**2 * dt_) + sig_dt90 * z)
+
+        future_dates90 = pd.date_range(start=close.index[-1], periods=T90+1, freq="B")
+
+        pcts90 = [10, 25, 50, 75, 90]
+        pct_paths90 = {p: np.percentile(paths90, p, axis=0) for p in pcts90}
+        mc90_up10_prob = float(np.mean(paths90[:, -1] >= S0 * 1.10)) * 100
+
+        # 30/60/90日時点のパーセンタイル価格テーブル
+        for days, label in [(30, '1ヶ月後'), (60, '2ヶ月後'), (90, '3ヶ月後')]:
+            idx = min(days, T90)
+            row = [label] + [float(np.percentile(paths90[:, idx], p)) for p in [10, 25, 50, 75, 90]]
+            mc90_table.append(row)
+
+        fig_mc90 = go.Figure()
+
+        # 過去90日実績
+        hist_90 = close.tail(90)
+        fig_mc90.add_trace(go.Scatter(
+            x=list(hist_90.index), y=list(hist_90),
+            name='実績株価', line=dict(color=TX, width=2),
+            hovertemplate='実績: ¥%{y:,.0f}<extra></extra>'
+        ))
+
+        # 信頼帯（10〜90%ile 塗りつぶし）
+        fig_mc90.add_trace(go.Scatter(
+            x=list(future_dates90) + list(future_dates90)[::-1],
+            y=list(pct_paths90[10]) + list(pct_paths90[90])[::-1],
+            fill='toself', fillcolor='rgba(0,212,255,0.06)',
+            line=dict(color='rgba(0,0,0,0)'), name='10〜90%ile帯', showlegend=True
+        ))
+        fig_mc90.add_trace(go.Scatter(
+            x=list(future_dates90) + list(future_dates90)[::-1],
+            y=list(pct_paths90[25]) + list(pct_paths90[75])[::-1],
+            fill='toself', fillcolor='rgba(0,212,255,0.12)',
+            line=dict(color='rgba(0,0,0,0)'), name='25〜75%ile帯', showlegend=True
+        ))
+        # 中央値
+        fig_mc90.add_trace(go.Scatter(
+            x=list(future_dates90), y=list(pct_paths90[50]),
+            name='中央値', line=dict(color=AC, width=2),
+            hovertemplate='中央値: ¥%{y:,.0f}<extra></extra>'
+        ))
+        # ±10%ライン
+        for mult, lbl, col, col_dim in [
+            (1.10, '+10%', GR, 'rgba(0,255,136,0.4)'),
+            (0.90, '−10%', '#ff4444', 'rgba(255,68,68,0.4)')
+        ]:
+            fig_mc90.add_hline(
+                y=S0 * mult,
+                line=dict(color=col_dim, width=1, dash='dash'),
+                annotation_text=f'{lbl} ¥{S0*mult:,.0f}',
+                annotation_font=dict(color=col, size=10)
+            )
+
+        # イベントラインを追加
+        today = pd.Timestamp.today().normalize()
+        end_date = future_dates90[-1]
+        for ev in calendar_events:
+            try:
+                ev_dt = pd.Timestamp(ev['date'])
+                if today <= ev_dt <= end_date:
+                    fig_mc90.add_vline(
+                        x=ev_dt.timestamp() * 1000,
+                        line=dict(color=ev['color'], width=1.5, dash='dot'),
+                        annotation_text=ev['label'],
+                        annotation_position='top',
+                        annotation_font=dict(color=ev['color'], size=10)
+                    )
+            except Exception:
+                pass
+
+        apply_layout(fig_mc90, height=460, yaxis_title='株価（円）')
+        fig_mc90.update_layout(
+            title=dict(text='3ヶ月株価予測（GBM モンテカルロ N=2,000）', font=dict(color=TX, size=14)),
+            legend=dict(orientation='h', y=1.08, bgcolor='rgba(0,0,0,0)')
+        )
+        fig_mc90.add_annotation(
+            x=0.01, y=0.03, xref='paper', yref='paper',
+            text=f"3ヶ月後+10%超の確率: {mc90_up10_prob:.1f}%  |  HV30: {hv30*100:.1f}%  |  ドリフト: {annual_drift*100:.1f}%/年",
+            showarrow=False, font=dict(size=11, color=AC2),
+            align='left', bgcolor='rgba(0,0,0,0.5)'
+        )
+        html_mc90 = safe_html(fig_mc90, "chart-mc90")
+        print(f"  Chart 15 (MC 90day) OK: 3m+10% prob={mc90_up10_prob:.1f}%")
+    else:
+        print("  Chart 15 (MC 90day): skipped")
+except Exception as e:
+    print(f"  [WARN] Chart 15 (MC 90day): {e}")
+    traceback.print_exc()
+
 # ─────────────────────────────────────────
 # Section 3: HTML生成
 # ─────────────────────────────────────────
@@ -1663,6 +1824,78 @@ if html_mc:
         "HV30（30日ヒストリカルボラティリティ）を使用したGBMによる確率分布",
         html_mc,
         mc_insight,
+    ))
+
+# 3ヶ月予測・イベントカレンダー
+if calendar_events or html_mc90:
+    body_sections.append(section_html("3ヶ月株価予測 &amp; イベントカレンダー"))
+
+# イベントテーブル
+if calendar_events:
+    today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
+    rows_html = ""
+    for ev in calendar_events:
+        ev_dt = pd.Timestamp(ev['date'])
+        days_until = (ev_dt - pd.Timestamp.today()).days
+        days_txt = f"<span style='color:{ev['color']};font-size:11px'>あと{days_until}日</span>" if days_until >= 0 else f"<span style='color:{DIM};font-size:11px'>{abs(days_until)}日前</span>"
+        rows_html += f"""<tr>
+  <td style='padding:8px 12px;color:{ev['color']};font-weight:700'>{ev['date']}</td>
+  <td style='padding:8px 12px'>{days_txt}</td>
+  <td style='padding:8px 12px;font-weight:600'>{ev['label']}</td>
+  <td style='padding:8px 12px;color:{DIM}'>{ev.get('impact','')}</td>
+  <td style='padding:8px 12px;color:{DIM};font-size:12px'>{ev.get('detail','')}</td>
+</tr>"""
+    event_table = f"""<div style='overflow-x:auto'>
+<table style='width:100%;border-collapse:collapse;font-size:13px'>
+  <thead><tr style='border-bottom:1px solid rgba(255,255,255,0.1)'>
+    <th style='padding:8px 12px;text-align:left;color:{DIM};font-size:11px;text-transform:uppercase'>日付</th>
+    <th style='padding:8px 12px;text-align:left;color:{DIM};font-size:11px;text-transform:uppercase'>残り</th>
+    <th style='padding:8px 12px;text-align:left;color:{DIM};font-size:11px;text-transform:uppercase'>イベント</th>
+    <th style='padding:8px 12px;text-align:left;color:{DIM};font-size:11px;text-transform:uppercase'>予想影響</th>
+    <th style='padding:8px 12px;text-align:left;color:{DIM};font-size:11px;text-transform:uppercase'>詳細</th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table></div>"""
+    body_sections.append(card("イベントカレンダー（今後3ヶ月）",
+        "yfinance calendar より取得。決算発表・配当落ち日など株価に影響するイベント。",
+        event_table))
+
+# 3ヶ月MCチャート
+if html_mc90:
+    # 価格シナリオテーブル
+    tbl_rows = ""
+    for row in mc90_table:
+        lbl, p10, p25, p50, p75, p90 = row
+        chg50 = (p50 / cur_price - 1) * 100 if cur_price else 0
+        c50 = GR if chg50 > 0 else '#ff4444'
+        tbl_rows += f"""<tr style='border-bottom:1px solid rgba(255,255,255,0.05)'>
+  <td style='padding:8px 12px;font-weight:600'>{lbl}</td>
+  <td style='padding:8px 12px;color:#ff6666'>¥{p10:,.0f}</td>
+  <td style='padding:8px 12px;color:{AC3}'>¥{p25:,.0f}</td>
+  <td style='padding:8px 12px;color:{AC};font-weight:700'>¥{p50:,.0f} <span style='font-size:11px;color:{c50}'>({chg50:+.1f}%)</span></td>
+  <td style='padding:8px 12px;color:{GR}'>¥{p75:,.0f}</td>
+  <td style='padding:8px 12px;color:#66ff99'>¥{p90:,.0f}</td>
+</tr>"""
+    scenario_table = f"""<div style='overflow-x:auto;margin-bottom:16px'>
+<table style='width:100%;border-collapse:collapse;font-size:13px'>
+  <thead><tr style='border-bottom:1px solid rgba(255,255,255,0.1)'>
+    <th style='padding:8px 12px;text-align:left;color:{DIM};font-size:11px;text-transform:uppercase'>期間</th>
+    <th style='padding:8px 12px;text-align:left;color:#ff6666;font-size:11px'>悲観(10%ile)</th>
+    <th style='padding:8px 12px;text-align:left;color:{AC3};font-size:11px'>弱気(25%ile)</th>
+    <th style='padding:8px 12px;text-align:left;color:{AC};font-size:11px'>中央値(50%ile)</th>
+    <th style='padding:8px 12px;text-align:left;color:{GR};font-size:11px'>強気(75%ile)</th>
+    <th style='padding:8px 12px;text-align:left;color:#66ff99;font-size:11px'>楽観(90%ile)</th>
+  </tr></thead>
+  <tbody>{tbl_rows}</tbody>
+</table></div>"""
+    mc90_insight = (f"3ヶ月後に+10%以上となる確率: <strong style='color:{GR}'>{mc90_up10_prob:.1f}%</strong>  "
+                    f"| ドリフト: アナリスト目標株価から逆算。HV30ベースGBM N=2,000本。"
+                    if mc90_up10_prob is not None else "")
+    body_sections.append(card(
+        "3ヶ月株価予測（モンテカルロ）",
+        "HV30（30日ヒストリカルボラティリティ）を使用したGBMによる90日シミュレーション。縦線＝今後のイベント。",
+        scenario_table + html_mc90,
+        mc90_insight,
     ))
 
 # ─────────────────────────────────────────
