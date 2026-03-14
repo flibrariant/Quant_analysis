@@ -362,17 +362,50 @@ try:
 except Exception as e:
     print(f"  純負債取得エラー: {e}")
 
-# TTM EBITDA系列を構築
-def build_ttm_ebitda(close_index, ebitda_q, ebitda_annual):
+# 実際の決算発表日を取得し、四半期EBITDAの「使用開始日」を発表日に補正
+# yfinanceのebitda_qはfiscal quarter end dateでインデックスされているが、
+# 実際のデータは決算発表日（通常4〜6週間後）まで市場に存在しないため補正が必要
+def get_earnings_release_dates(ticker_obj, fiscal_dates):
+    """fiscal quarter end date → 実際の決算発表日 のマッピングを返す"""
+    release_map = {}
+    try:
+        ed = ticker_obj.earnings_dates
+        if ed is not None and not ed.empty:
+            ed.index = pd.to_datetime(ed.index).tz_localize(None)
+            release_dates = sorted(ed.index.tolist())
+            for fdate in fiscal_dates:
+                # fiscal end から30〜120日後の範囲で最も近い決算発表日を探す
+                candidates = [d for d in release_dates
+                              if pd.Timedelta(days=30) <= (d - fdate) <= pd.Timedelta(days=120)]
+                if candidates:
+                    release_map[fdate] = min(candidates)
+    except Exception as e:
+        print(f"  決算発表日取得エラー: {e}")
+    # 見つからなかった場合は fiscal end + 45日をデフォルトとする
+    for fdate in fiscal_dates:
+        if fdate not in release_map:
+            release_map[fdate] = fdate + pd.Timedelta(days=45)
+    return release_map
+
+fiscal_dates = list(ebitda_q.index)
+release_map = get_earnings_release_dates(ticker_obj, fiscal_dates)
+# ebitda_qを発表日インデックスに変換
+ebitda_q_released = pd.Series(
+    {release_map[fd]: val for fd, val in ebitda_q.items()},
+    dtype=float
+).sort_index()
+print(f"  決算発表日補正: {[(fd.date(), release_map[fd].date()) for fd in sorted(release_map)]}")
+
+# TTM EBITDA系列を構築（発表日ベース）
+def build_ttm_ebitda(close_index, ebitda_q_released, ebitda_annual):
     result = {}
     ann_dates = sorted(ebitda_annual.keys()) if ebitda_annual else []
     for date in close_index:
-        past_q = ebitda_q[ebitda_q.index <= date]
+        past_q = ebitda_q_released[ebitda_q_released.index <= date]
         if len(past_q) >= 4:
             last_4 = past_q.iloc[-4:]
             valid_count = last_4.notna().sum()
             if valid_count >= 3:
-                # NaNがある場合は平均で補完（3四半期合計 × 4/3）
                 ttm = last_4.sum() * (4 / valid_count)
                 if ttm > 0:
                     result[date] = ttm
@@ -390,7 +423,7 @@ def build_ttm_ebitda(close_index, ebitda_q, ebitda_annual):
             if ttm > 0: result[date] = ttm
     return pd.Series(result)
 
-ttm_ebitda = build_ttm_ebitda(close_3y.index, ebitda_q, ebitda_annual)
+ttm_ebitda = build_ttm_ebitda(close_3y.index, ebitda_q_released, ebitda_annual)
 
 # 日次EV = 時価総額 + 純負債（四半期更新値を前向き補完）
 ev_shares_out = info.get('sharesOutstanding', info.get('impliedSharesOutstanding', None))
