@@ -1076,6 +1076,182 @@ if len(peer_data) >= 2:
     )
 
 # ════════════════════════════════════════════════════════════════════════
+# 9b. フォワード分析データ取得
+# ════════════════════════════════════════════════════════════════════════
+print("フォワード分析データ取得中...")
+
+# 決算サプライズ
+surprise_data = []
+try:
+    ed_raw = ticker_obj.earnings_dates
+    if ed_raw is not None and not ed_raw.empty:
+        ed_raw.index = pd.to_datetime(ed_raw.index).tz_localize(None).normalize()
+        for dt, row in ed_raw.sort_index().iterrows():
+            est = row.get('EPS Estimate')
+            rep = row.get('Reported EPS')
+            sur = row.get('Surprise(%)')
+            if pd.notna(est) and pd.notna(rep) and pd.notna(sur):
+                surprise_data.append({'date': dt, 'estimate': float(est), 'reported': float(rep), 'surprise': float(sur)})
+    print(f"  決算サプライズ: {len(surprise_data)}件")
+except Exception as e:
+    print(f"  決算サプライズ取得エラー: {e}")
+
+# Forward PER / PEG
+fwd_pe = ticker_obj.info.get('forwardPE')
+trailing_pe = ticker_obj.info.get('trailingPE')
+fwd_eps = ticker_obj.info.get('forwardEps')
+trailing_eps_val = ticker_obj.info.get('trailingEps')
+eps_growth = ticker_obj.info.get('earningsGrowth')  # 小数 (e.g. 0.514 = 51.4%)
+peg = (fwd_pe / (eps_growth * 100)) if (fwd_pe and eps_growth and eps_growth > 0) else None
+_peg_str = f'{peg:.2f}' if peg else 'N/A'
+print(f"  Forward PE={fwd_pe}, Trailing PE={trailing_pe}, EPS growth={eps_growth}, PEG={_peg_str}")
+
+# EPS Revision Trend
+eps_trend_data = None
+eps_revisions_data = None
+try:
+    eps_trend_data = ticker_obj.eps_trend
+    eps_revisions_data = ticker_obj.eps_revisions
+    print(f"  EPS trend取得: {eps_trend_data.shape if eps_trend_data is not None else 'None'}")
+except Exception as e:
+    print(f"  EPS trend取得エラー: {e}")
+
+# ─── fig_surprise: 決算サプライズ（チャート⑦）
+fig_surprise = None
+if len(surprise_data) >= 2:
+    s_dates = [d['date'] for d in surprise_data]
+    s_est   = [d['estimate'] for d in surprise_data]
+    s_rep   = [d['reported'] for d in surprise_data]
+    s_sur   = [d['surprise'] for d in surprise_data]
+    s_colors = ['#00ff88' if v >= 0 else '#ff4444' for v in s_sur]
+
+    fig_surprise = go.Figure()
+    fig_surprise.add_trace(go.Bar(
+        x=[str(d.date()) for d in s_dates],
+        y=s_sur,
+        marker_color=s_colors,
+        name='サプライズ率',
+        text=[f'{v:+.1f}%' for v in s_sur],
+        textposition='outside',
+        textfont=dict(color='white', size=11),
+        hovertemplate='%{x}<br>サプライズ: %{y:+.1f}%<extra></extra>'
+    ))
+    fig_surprise.add_hline(y=0, line=dict(color='#888', width=1))
+    avg_sur = sum(s_sur) / len(s_sur)
+    fig_surprise.add_hline(y=avg_sur,
+        line=dict(color='#ffd700', width=1.5, dash='dash'),
+        annotation_text=f'平均 {avg_sur:+.1f}%',
+        annotation_font_color='#ffd700', annotation_position='right')
+    fig_surprise.update_layout(
+        title=dict(text='決算EPSサプライズ率（実績 vs コンセンサス予想）', font=dict(color='white', size=16)),
+        height=340, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+        font=dict(color='white', family='Arial'),
+        xaxis=dict(gridcolor='#1e1e30', tickangle=-30),
+        yaxis=dict(gridcolor='#1e1e30', ticksuffix='%', zeroline=False),
+        margin=dict(l=60, r=80, t=50, b=60),
+        showlegend=False
+    )
+
+# ─── fig_fwd_val: Trailing vs Forward PER + PEG（チャート⑧）
+fig_fwd_val = None
+if fwd_pe and trailing_pe:
+    labels = ['Trailing PER\n(実績EPS)', 'Forward PER\n(来期予想EPS)']
+    values = [trailing_pe, fwd_pe]
+    colors = ['#ff9944', '#00d4ff']
+
+    fig_fwd_val = go.Figure()
+    fig_fwd_val.add_trace(go.Bar(
+        x=labels, y=values,
+        marker_color=colors,
+        text=[f'{v:.1f}x' for v in values],
+        textposition='outside',
+        textfont=dict(color='white', size=14),
+        width=0.4,
+        hovertemplate='%{x}: %{y:.1f}x<extra></extra>'
+    ))
+    # PEG アノテーション
+    if peg:
+        peg_color = '#00ff88' if peg < 1 else '#ffd700' if peg < 1.5 else '#ff4444'
+        peg_judge = '割安（成長に対して）' if peg < 1 else 'フェアバリュー' if peg < 1.5 else '割高'
+        fig_fwd_val.add_annotation(
+            x=1, y=fwd_pe * 1.15,
+            text=f'PEG = {peg:.2f}<br><span style="font-size:11px">{peg_judge}</span>',
+            showarrow=False,
+            font=dict(color=peg_color, size=13),
+            bgcolor='rgba(0,0,0,0.5)',
+            bordercolor=peg_color, borderwidth=1
+        )
+    # EPS 成長率ライン
+    if eps_growth:
+        fig_fwd_val.add_annotation(
+            x=0, y=max(values) * 1.05,
+            text=f'EPS成長率 +{eps_growth*100:.0f}%',
+            showarrow=False,
+            font=dict(color='#ffd700', size=11),
+            xanchor='center'
+        )
+    fig_fwd_val.update_layout(
+        title=dict(text='Trailing PER vs Forward PER（来期予想ベース）', font=dict(color='white', size=16)),
+        height=340, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+        font=dict(color='white', family='Arial'),
+        xaxis=dict(gridcolor='#1e1e30'),
+        yaxis=dict(gridcolor='#1e1e30', ticksuffix='x', range=[0, max(values) * 1.4]),
+        margin=dict(l=60, r=40, t=50, b=60),
+        showlegend=False
+    )
+
+# ─── fig_eps_trend: EPS修正トレンド（チャート⑨）
+fig_eps_trend = None
+if eps_trend_data is not None:
+    try:
+        time_cols = ['90daysAgo', '60daysAgo', '30daysAgo', '7daysAgo', 'current']
+        time_labels = ['90日前', '60日前', '30日前', '7日前', '現在']
+        period_map = {'0q': '今四半期', '+1q': '来四半期', '0y': '今期通年', '+1y': '来期通年'}
+        colors_map = {'0q': '#00d4ff', '+1q': '#7eb8ff', '0y': '#ffd700', '+1y': '#ff6b35'}
+
+        fig_eps_trend = go.Figure()
+        for period, label in period_map.items():
+            if period in eps_trend_data.index:
+                row = eps_trend_data.loc[period]
+                vals = []
+                for c in time_cols:
+                    v = row.get(c, None)
+                    vals.append(float(v) if pd.notna(v) else None)
+                if any(v is not None for v in vals):
+                    fig_eps_trend.add_trace(go.Scatter(
+                        x=time_labels,
+                        y=vals,
+                        mode='lines+markers',
+                        name=label,
+                        line=dict(color=colors_map.get(period, '#aaa'), width=2),
+                        marker=dict(size=8),
+                        connectgaps=True,
+                        hovertemplate=f'{label}<br>%{{x}}: $%{{y:.2f}}<extra></extra>'
+                    ))
+
+        # EPS修正の方向性（revision）
+        if eps_revisions_data is not None:
+            rev_text = []
+            for period in ['0q', '+1q', '0y', '+1y']:
+                if period in eps_revisions_data.index:
+                    row = eps_revisions_data.loc[period]
+                    up30 = int(row.get('upLast30days', 0) or 0)
+                    dn30 = int(row.get('downLast30days', 0) or 0)
+                    rev_text.append(f'{period_map[period]}: ↑{up30} ↓{dn30}（30日）')
+
+        fig_eps_trend.update_layout(
+            title=dict(text='アナリストEPS修正トレンド（コンセンサス推移）', font=dict(color='white', size=16)),
+            height=380, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+            font=dict(color='white', family='Arial'),
+            legend=dict(orientation='h', y=1.05, bgcolor='rgba(0,0,0,0)', font_size=12),
+            xaxis=dict(gridcolor='#1e1e30'),
+            yaxis=dict(gridcolor='#1e1e30', tickprefix='$', title='EPS予想'),
+            margin=dict(l=70, r=40, t=50, b=40)
+        )
+    except Exception as e:
+        print(f"  EPS trendチャートエラー: {e}")
+
+# ════════════════════════════════════════════════════════════════════════
 # 10. HTML パーツ生成
 # ════════════════════════════════════════════════════════════════════════
 chart_price_html = fig1_v2.to_html(full_html=False, include_plotlyjs=False,
@@ -1095,6 +1271,10 @@ chart_ee_html     = fig_ee.to_html(full_html=False, include_plotlyjs=False, div_
 chart_ee_pctb_html = fig_ee_pctb.to_html(full_html=False, include_plotlyjs=False, div_id='chart-ev-ebitda-pctb') if fig_ee_pctb else ''
 chart_matrix_html = fig_matrix.to_html(full_html=False, include_plotlyjs=False, div_id='chart-matrix') if fig_matrix else ''
 chart_peer_html   = fig_peer.to_html(full_html=False, include_plotlyjs=False, div_id='chart-peer') if fig_peer else ''
+
+chart_surprise_html  = fig_surprise.to_html(full_html=False, include_plotlyjs=False, div_id='chart-surprise') if fig_surprise else ''
+chart_fwd_val_html   = fig_fwd_val.to_html(full_html=False, include_plotlyjs=False, div_id='chart-fwd-val') if fig_fwd_val else ''
+chart_eps_trend_html = fig_eps_trend.to_html(full_html=False, include_plotlyjs=False, div_id='chart-eps-trend') if fig_eps_trend else ''
 
 # ─── PER 判定
 if cur_pctb < 0.2:
@@ -1264,6 +1444,27 @@ fx_hedge_html = """<div style="background:var(--card);border:1px solid rgba(255,
   </div>
 </div>"""
 
+# ─── rev_text_html
+rev_text_html = ''
+if eps_revisions_data is not None:
+    lines = []
+    for period, label in [('0q', '今四半期'), ('+1q', '来四半期'), ('0y', '今期'), ('+1y', '来期')]:
+        if period in eps_revisions_data.index:
+            row = eps_revisions_data.loc[period]
+            up = int(row.get('upLast30days', 0) or 0)
+            dn = int(row.get('downLast30days', 0) or 0)
+            col = '#00ff88' if up > dn else '#ff4444' if dn > up else '#ffd700'
+            lines.append(f'<span style="color:{col}">{label}: ↑{up} ↓{dn}</span>')
+    rev_text_html = '30日間のEPS修正: ' + ' &nbsp;|&nbsp; '.join(lines)
+
+# ─── surprise summary
+if surprise_data:
+    _sur4 = ', '.join([f'{d["surprise"]:+.1f}%' for d in surprise_data[-4:]])
+    _sur_avg = f'{sum(d["surprise"] for d in surprise_data)/len(surprise_data):+.1f}%'
+    surprise_ib_text = f'直近4回のサプライズ率: {_sur4}。平均 {_sur_avg}'
+else:
+    surprise_ib_text = '決算サプライズデータなし'
+
 HTML = f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -1342,6 +1543,8 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
 .stbl tr:hover td{{background:rgba(255,255,255,.02)}}
 .pgrid{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:28px}}
 @media(max-width:860px){{.pgrid{{grid-template-columns:1fr}}}}
+.grid2{{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;margin-bottom:20px}}
+@media(max-width:860px){{.grid2{{grid-template-columns:1fr}}}}
 .pcard{{background:var(--card);border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:20px}}
 .vcard{{background:linear-gradient(135deg,#0f0f23,#1e0f28);
   border:1px solid rgba(255,107,53,.3);border-radius:16px;
@@ -1722,6 +1925,25 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
         <div style="font-size:10px;color:var(--dim);margin-top:5px">{fmt_ret(target_high)}</div>
       </div>
     </div>
+  </div>
+
+  <!-- フォワード分析 -->
+  <div class="sec">フォワード分析（前向き指標）</div>
+  <div class="grid2">
+    <div class="cc"><div class="ct">決算EPSサプライズ率</div>
+      <div class="cd">実績EPSがコンセンサス予想を上回った/下回った割合。連続ビートは上方修正サイクルのシグナル。</div>
+      {chart_surprise_html}
+      <div class="ib">{surprise_ib_text}</div>
+    </div>
+    <div class="cc"><div class="ct">Trailing vs Forward PER</div>
+      <div class="cd">来期予想EPSを使ったForward PERは成長を織り込んだ割安感を示す。PEG=Forward PER÷EPS成長率、1未満が割安の目安。</div>
+      {chart_fwd_val_html}
+    </div>
+  </div>
+  <div class="cc"><div class="ct">アナリストEPS修正トレンド</div>
+    <div class="cd">過去90日間のコンセンサスEPS推移。右肩上がり＝上方修正サイクル継続中。</div>
+    {chart_eps_trend_html}
+    <div class="ib">{rev_text_html}</div>
   </div>
 
   <div style="margin-bottom:16px;color:var(--dim);font-size:11px">
