@@ -30,11 +30,13 @@ USD_JPY = 158.94
 
 PEER_MAP = {
     "7203.T": ["7267.T", "7201.T", "7261.T", "7270.T", "7269.T"],
-    "6701.T": ["6702.T", "6501.T", "6326.T", "9613.T", "9984.T"],  # 富士通・日立・クボタ・NTTデータ・ソフトバンクG
+    "6701.T": ["6702.T", "6501.T", "6326.T", "9984.T"],  # 富士通・日立・クボタ・ソフトバンクG
+    "7267.T": ["7203.T", "7201.T", "7261.T", "7270.T", "7269.T"],  # トヨタ・日産・マツダ・スバル・スズキ
 }
 PEER_LABEL_MAP = {
     "7203.T": "国内自動車大手",
     "6701.T": "国内IT・電機大手",
+    "7267.T": "国内自動車大手",
 }
 
 # ─────────────────────────────────────────
@@ -329,7 +331,8 @@ except Exception as e:
 
 net_debt_q = {}
 try:
-    debt_keys = ['Total Debt', 'Long Term Debt', 'Current Debt']
+    debt_keys = ['Total Debt', 'Long Term Debt', 'Current Debt',
+                 'Long Term Capital Lease Obligation', 'Current Capital Lease Obligation']
     cash_keys = ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']
     for col in q_bs.columns:
         dt = pd.to_datetime(col).tz_localize(None)
@@ -342,6 +345,14 @@ try:
                 cash = abs(float(q_bs.loc[k, col])); break
         net_debt_q[dt] = debt - cash
     net_debt_q = dict(sorted(net_debt_q.items()))
+    # 最新の純負債が大きく負（= 債務が取れていない）の場合 → info.totalDebt でフォールバック
+    if net_debt_q and total_debt_info:
+        latest_nd = list(net_debt_q.values())[-1]
+        info_nd = total_debt_info - (total_cash_info or 0)
+        # info側の純負債が正なのに BS側が負 → BSのdebtキー不足と判断
+        if info_nd > 0 and latest_nd < 0:
+            net_debt_q = {dt: info_nd for dt in net_debt_q}
+            print(f"  純負債: BS純負債が負 → info fallback {info_nd/1e12:.2f}兆円")
 except Exception as e:
     print(f"  純負債取得エラー: {e}")
 
