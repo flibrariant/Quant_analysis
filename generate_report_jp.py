@@ -30,9 +30,11 @@ USD_JPY = 158.94
 
 PEER_MAP = {
     "7203.T": ["7267.T", "7201.T", "7261.T", "7270.T", "7269.T"],
+    "6701.T": ["6702.T", "6501.T", "6326.T", "9613.T", "9984.T"],  # 富士通・日立・クボタ・NTTデータ・ソフトバンクG
 }
 PEER_LABEL_MAP = {
     "7203.T": "国内自動車大手",
+    "6701.T": "国内IT・電機大手",
 }
 
 # ─────────────────────────────────────────
@@ -371,8 +373,11 @@ ebitda_q_released = pd.Series(
 def build_ttm_ebitda(close_index, ebitda_q_released, ebitda_annual):
     result = {}
     ann_dates = sorted(ebitda_annual.keys()) if ebitda_annual else []
+    # 空や非DatetimeIndexの場合は四半期パスをスキップ
+    has_q = (not ebitda_q_released.empty and
+             isinstance(ebitda_q_released.index, pd.DatetimeIndex))
     for date in close_index:
-        past_q = ebitda_q_released[ebitda_q_released.index <= date]
+        past_q = ebitda_q_released[ebitda_q_released.index <= date] if has_q else pd.Series(dtype=float)
         if len(past_q) >= 4:
             last_4 = past_q.iloc[-4:]
             valid_count = last_4.notna().sum()
