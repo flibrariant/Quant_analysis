@@ -131,19 +131,30 @@ print("TTM PER 系列構築...")
 
 def build_ttm_eps_series(close_index, eps_q, annual_eps_dict):
     result = {}
+    ann_dates_sorted = sorted(annual_eps_dict.keys()) if annual_eps_dict else []
     for date in close_index:
         past_q = eps_q[eps_q.index <= date]
         if len(past_q) >= 4:
-            ttm = past_q.iloc[-4:].sum()
-            if ttm > 0:
-                result[date] = ttm
-                continue
-        if annual_eps_dict:
-            ann_dates = sorted(annual_eps_dict.keys())
-            past_ann = [d for d in ann_dates if d <= date + pd.Timedelta(days=180)]
-            if past_ann:
-                latest_ann_date = max(past_ann)
-                ttm = annual_eps_dict[latest_ann_date]
+            last_4 = past_q.iloc[-4:]
+            valid_count = last_4.notna().sum()
+            if valid_count >= 3:
+                ttm = last_4.sum()
+                if ttm > 0:
+                    result[date] = ttm
+                    continue
+        if len(ann_dates_sorted) >= 2:
+            prev_dates = [d for d in ann_dates_sorted if d <= date]
+            next_dates = [d for d in ann_dates_sorted if d >  date]
+            if prev_dates and next_dates:
+                d0, d1 = max(prev_dates), min(next_dates)
+                e0, e1 = annual_eps_dict[d0], annual_eps_dict[d1]
+                ratio = (date - d0).days / max((d1 - d0).days, 1)
+                ttm = e0 + (e1 - e0) * ratio
+                if ttm > 0:
+                    result[date] = ttm
+                    continue
+            elif prev_dates:
+                ttm = annual_eps_dict[max(prev_dates)]
                 if ttm > 0:
                     result[date] = ttm
     return pd.Series(result)
