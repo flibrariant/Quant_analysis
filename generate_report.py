@@ -277,6 +277,164 @@ target_med   = info.get('targetMedianPrice', 1200)
 num_analysts = info.get('numberOfAnalystOpinions', 30)
 rec_mean     = info.get('recommendationMean', 1.8)
 
+# ─── EV/EBITDA データ取得 ────────────────────────────────
+print("EV/EBITDA データ取得中...")
+
+# 四半期 EBITDA 取得
+ebitda_q = pd.Series(dtype=float)
+try:
+    qinc = ticker_obj.quarterly_income_stmt
+    ebitda_keys = ['EBITDA', 'Normalized EBITDA']
+    for k in ebitda_keys:
+        if k in qinc.index:
+            raw = qinc.loc[k].dropna()
+            ebitda_q = pd.Series({pd.to_datetime(c).tz_localize(None): abs(float(v)) for c, v in raw.items()}).sort_index()
+            break
+    if ebitda_q.empty:
+        qcf = ticker_obj.quarterly_cashflow
+        da_keys = ['Depreciation And Amortization', 'Depreciation Amortization Depletion']
+        oi_keys = ['Operating Income', 'EBIT']
+        oi = da = None
+        for k in oi_keys:
+            if k in qinc.index: oi = qinc.loc[k]; break
+        for k in da_keys:
+            if k in qcf.index: da = qcf.loc[k]; break
+        if oi is not None and da is not None:
+            for col in oi.index:
+                dt = pd.to_datetime(col).tz_localize(None)
+                o_val = oi.get(col, np.nan)
+                d_val = da.get(col, np.nan)
+                if pd.notna(o_val) and pd.notna(d_val):
+                    ebitda_q[dt] = abs(float(o_val)) + abs(float(d_val))
+            ebitda_q = ebitda_q.sort_index()
+    print(f"  四半期EBITDA: {len(ebitda_q)}件 {dict(list(ebitda_q.items())[:3])}")
+except Exception as e:
+    print(f"  EBITDA取得エラー: {e}")
+
+# 年次 EBITDA（補間用）
+ebitda_annual = {}
+try:
+    ainc = ticker_obj.income_stmt
+    ebitda_keys = ['EBITDA', 'Normalized EBITDA']
+    for k in ebitda_keys:
+        if k in ainc.index:
+            for col, val in ainc.loc[k].dropna().items():
+                ebitda_annual[pd.to_datetime(col).tz_localize(None)] = abs(float(val))
+            break
+    if not ebitda_annual:
+        acf = ticker_obj.cashflow
+        da_keys = ['Depreciation And Amortization', 'Depreciation Amortization Depletion']
+        oi_keys = ['Operating Income', 'EBIT']
+        oi = da = None
+        for k in oi_keys:
+            if k in ainc.index: oi = ainc.loc[k]; break
+        for k in da_keys:
+            if k in acf.index: da = acf.loc[k]; break
+        if oi is not None and da is not None:
+            for col in oi.index:
+                dt = pd.to_datetime(col).tz_localize(None)
+                o_val = oi.get(col, np.nan)
+                d_val = da.get(col, np.nan)
+                if pd.notna(o_val) and pd.notna(d_val):
+                    ebitda_annual[dt] = abs(float(o_val)) + abs(float(d_val))
+    print(f"  年次EBITDA: {ebitda_annual}")
+except Exception as e:
+    print(f"  年次EBITDA取得エラー: {e}")
+
+# 純負債（四半期バランスシートから）
+net_debt_q = {}
+try:
+    qbs = ticker_obj.quarterly_balance_sheet
+    debt_keys = ['Total Debt', 'Long Term Debt', 'Current Debt']
+    cash_keys = ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']
+    for col in qbs.columns:
+        dt = pd.to_datetime(col).tz_localize(None)
+        debt = cash = 0
+        for k in debt_keys:
+            if k in qbs.index and pd.notna(qbs.loc[k, col]):
+                debt = abs(float(qbs.loc[k, col])); break
+        for k in cash_keys:
+            if k in qbs.index and pd.notna(qbs.loc[k, col]):
+                cash = abs(float(qbs.loc[k, col])); break
+        net_debt_q[dt] = debt - cash
+    net_debt_q = dict(sorted(net_debt_q.items()))
+    print(f"  純負債 (直近): ${list(net_debt_q.values())[-1]/1e9:.1f}B")
+except Exception as e:
+    print(f"  純負債取得エラー: {e}")
+
+# TTM EBITDA系列を構築
+def build_ttm_ebitda(close_index, ebitda_q, ebitda_annual):
+    result = {}
+    ann_dates = sorted(ebitda_annual.keys()) if ebitda_annual else []
+    for date in close_index:
+        past_q = ebitda_q[ebitda_q.index <= date]
+        if len(past_q) >= 4:
+            last_4 = past_q.iloc[-4:]
+            if last_4.notna().sum() >= 3:
+                ttm = last_4.sum()
+                if ttm > 0:
+                    result[date] = ttm
+                    continue
+        prev_d = [d for d in ann_dates if d <= date]
+        next_d = [d for d in ann_dates if d > date]
+        if prev_d and next_d:
+            d0, d1 = max(prev_d), min(next_d)
+            e0, e1 = ebitda_annual[d0], ebitda_annual[d1]
+            ratio = (date - d0).days / max((d1 - d0).days, 1)
+            ttm = e0 + (e1 - e0) * ratio
+            if ttm > 0: result[date] = ttm
+        elif prev_d:
+            ttm = ebitda_annual[max(prev_d)]
+            if ttm > 0: result[date] = ttm
+    return pd.Series(result)
+
+ttm_ebitda = build_ttm_ebitda(close_3y.index, ebitda_q, ebitda_annual)
+
+# 日次EV = 時価総額 + 純負債（四半期更新値を前向き補完）
+ev_shares_out = info.get('sharesOutstanding', info.get('impliedSharesOutstanding', None))
+if ev_shares_out:
+    mktcap_series = close_3y * ev_shares_out
+else:
+    mktcap_series = pd.Series(dtype=float)
+
+if net_debt_q and not mktcap_series.empty:
+    nd_series = pd.Series(net_debt_q).reindex(close_3y.index, method='ffill')
+    ev_series = mktcap_series + nd_series
+else:
+    ev_series = pd.Series(dtype=float)
+
+# EV/EBITDA 系列
+if not ev_series.empty and not ttm_ebitda.empty:
+    ev_ebitda_all = (ev_series / ttm_ebitda).dropna()
+    ev_ebitda_all = ev_ebitda_all[(ev_ebitda_all > 0) & (ev_ebitda_all < 200)]
+else:
+    ev_ebitda_all = pd.Series(dtype=float)
+
+# EV/EBITDA BB
+has_ev_ebitda = False
+ee_plot = pd.DataFrame()
+cur_ee = cur_ee_ma = cur_ee_up = cur_ee_lo = cur_ee_pctb = 0.0
+if len(ev_ebitda_all) > 60:
+    ee_df = ev_ebitda_all.to_frame('ee')
+    ee_df['ma']    = ee_df['ee'].rolling(52).mean()
+    ee_df['std']   = ee_df['ee'].rolling(52).std()
+    ee_df['upper'] = ee_df['ma'] + 2 * ee_df['std']
+    ee_df['lower'] = ee_df['ma'] - 2 * ee_df['std']
+    ee_df['pct_b'] = ((ee_df['ee'] - ee_df['lower']) / (ee_df['upper'] - ee_df['lower'])).clip(-0.5, 1.5)
+    ee_plot = ee_df.dropna()
+    if len(ee_plot) > 0:
+        cur_ee      = float(ee_plot['ee'].iloc[-1])
+        cur_ee_ma   = float(ee_plot['ma'].iloc[-1])
+        cur_ee_up   = float(ee_plot['upper'].iloc[-1])
+        cur_ee_lo   = float(ee_plot['lower'].iloc[-1])
+        cur_ee_pctb = float(ee_plot['pct_b'].iloc[-1])
+        has_ev_ebitda = True
+        print(f"  EV/EBITDA={cur_ee:.1f}x  MA={cur_ee_ma:.1f}x  %B={cur_ee_pctb:.2f}")
+    else:
+        print("  EV/EBITDAデータ不足（dropna後空）")
+else:
+    print("  EV/EBITDAデータ不足")
+
 # 機関投資家
 try:
     inst_holders = ticker_obj.institutional_holders
@@ -706,6 +864,176 @@ fig4_fc.update_layout(
     yaxis=dict(gridcolor='#1e1e30', title='OBV'),
 )
 
+# ─── fig_ee: EV/EBITDA ボリンジャーバンド（チャート⑤）
+fig_ee = None
+if has_ev_ebitda:
+    fig_ee = make_subplots(rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.72, 0.28], vertical_spacing=0.06,
+        subplot_titles=('EV/EBITDA ボリンジャーバンド（52日±2σ）', '%B（BBバンド内の位置）'))
+
+    fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['upper']),
+        mode='lines', line=dict(color='rgba(255,107,53,0.4)', width=1),
+        name=f'BB上限 {cur_ee_up:.1f}x'), row=1, col=1)
+    fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['lower']),
+        mode='lines', line=dict(color='rgba(255,107,53,0.4)', width=1),
+        fill='tonexty', fillcolor='rgba(255,107,53,0.15)',
+        name=f'BB下限 {cur_ee_lo:.1f}x'), row=1, col=1)
+    fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['ma']),
+        mode='lines', line=dict(color='#ffd700', width=1.5, dash='dash'),
+        name=f'BB中央 {cur_ee_ma:.1f}x'), row=1, col=1)
+    fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['ee']),
+        mode='lines', line=dict(color='#ff6b35', width=2.5),
+        name=f'EV/EBITDA {cur_ee:.1f}x',
+        hovertemplate='EV/EBITDA: %{y:.1f}x<extra></extra>'), row=1, col=1)
+    fig_ee.add_annotation(x=ee_plot.index[-1], y=cur_ee,
+        text=f'現在 {cur_ee:.1f}x', showarrow=True, arrowhead=2,
+        arrowcolor='#ff6b35', ax=-60, ay=-30,
+        font=dict(color='white', size=12), bgcolor='#1a1a2e',
+        bordercolor='#ff6b35', borderwidth=1, row=1, col=1)
+
+    fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['pct_b']),
+        mode='lines', line=dict(color='#ff6b35', width=2),
+        fill='tozeroy', fillcolor='rgba(255,107,53,0.12)',
+        name=f'%B = {cur_ee_pctb:.2f}'), row=2, col=1)
+    for lvl, col in [(1.0,'#ff4444'),(0.8,'#ff9944'),(0.5,'#ffd700'),(0.2,'#44ff88'),(0.0,'#44ff88')]:
+        fig_ee.add_hline(y=lvl, line=dict(color=col, width=0.8, dash='dash'), row=2, col=1)
+    fig_ee.add_hrect(y0=0.8, y1=1.2, fillcolor='rgba(255,68,68,0.08)', line_width=0,
+        row=2, col=1, annotation_text='割高', annotation_font_color='#ff4444', annotation_position='right')
+    fig_ee.add_hrect(y0=-0.2, y1=0.2, fillcolor='rgba(68,255,136,0.08)', line_width=0,
+        row=2, col=1, annotation_text='割安', annotation_font_color='#44ff88', annotation_position='right')
+
+    ee_y_min = max(0, float(ee_plot[['ee','lower']].min().min()) * 0.90)
+    ee_y_max = float(ee_plot[['ee','upper']].max().max()) * 1.08
+    fig_ee.update_yaxes(range=[ee_y_min, ee_y_max], tickformat='.0f', ticksuffix='x', row=1, col=1)
+    fig_ee.update_yaxes(range=[-0.15, 1.3], tickformat='.1f', row=2, col=1)
+    fig_ee.update_layout(height=600, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+        font=dict(color='white', family='Arial'),
+        legend=dict(orientation='h', y=1.03, bgcolor='rgba(0,0,0,0)', font_size=12),
+        margin=dict(l=70, r=20, t=50, b=20))
+    for r in range(1, 3):
+        fig_ee.update_xaxes(gridcolor='#1e1e30', row=r, col=1)
+        fig_ee.update_yaxes(gridcolor='#1e1e30', row=r, col=1)
+
+# ─── fig_matrix: PER × EV/EBITDA 二軸マトリクス（チャート⑥）
+fig_matrix = None
+if has_ev_ebitda and len(per_plot) > 0:
+    common_idx = per_plot.index.intersection(ee_plot.index)
+    if len(common_idx) > 0:
+        common_idx = common_idx[common_idx >= common_idx[-1] - pd.Timedelta(days=365)]
+        per_aligned = per_plot.loc[common_idx, 'pct_b']
+        ee_aligned  = ee_plot.loc[common_idx, 'pct_b']
+
+        n_traj = len(common_idx)
+        colors_traj = [f'rgba(0,212,255,{0.15 + 0.7*i/max(n_traj-1,1):.2f})' for i in range(n_traj)]
+
+        fig_matrix = go.Figure()
+        fig_matrix.add_hrect(y0=0.5, y1=1.5, fillcolor='rgba(255,68,68,0.05)', line_width=0)
+        fig_matrix.add_vrect(x0=0.5, x1=1.5, fillcolor='rgba(255,68,68,0.05)', line_width=0)
+        fig_matrix.add_hrect(y0=-0.5, y1=0.5, fillcolor='rgba(68,255,136,0.03)', line_width=0)
+        fig_matrix.add_vrect(x0=-0.5, x1=0.5, fillcolor='rgba(68,255,136,0.03)', line_width=0)
+        for txt, x, y, col_ann in [
+            ('◎ 強い買い', 0.1, 0.1, '#00ff88'),
+            ('✕ 見送り',   0.9, 0.9, '#ff4444'),
+            ('△ 負債過多?', 0.1, 0.9, '#ff9944'),
+            ('△ 利益歪み?', 0.9, 0.1, '#ff9944'),
+        ]:
+            fig_matrix.add_annotation(x=x, y=y, text=txt, showarrow=False,
+                font=dict(color=col_ann, size=12), xref='paper', yref='paper', opacity=0.5)
+        fig_matrix.add_hline(y=0.5, line=dict(color='rgba(255,255,255,0.15)', width=1))
+        fig_matrix.add_vline(x=0.5, line=dict(color='rgba(255,255,255,0.15)', width=1))
+        fig_matrix.add_trace(go.Scatter(
+            x=list(per_aligned), y=list(ee_aligned),
+            mode='lines+markers',
+            line=dict(color='rgba(0,212,255,0.3)', width=1),
+            marker=dict(size=3, color=colors_traj),
+            name='過去1年の軌跡', showlegend=True,
+            hovertemplate='PER %%B: %{x:.2f}<br>EV/EBITDA %%B: %{y:.2f}<extra></extra>'
+        ))
+        fig_matrix.add_trace(go.Scatter(
+            x=[float(per_aligned.iloc[-1])], y=[float(ee_aligned.iloc[-1])],
+            mode='markers+text',
+            marker=dict(size=16, color='#ff6b35', symbol='star',
+                        line=dict(color='white', width=2)),
+            text=['現在'], textposition='top center',
+            textfont=dict(color='white', size=12),
+            name=f'現在 (PER%B={per_aligned.iloc[-1]:.2f}, EE%B={ee_aligned.iloc[-1]:.2f})',
+            showlegend=True
+        ))
+        fig_matrix.update_layout(
+            title=dict(text='PER × EV/EBITDA マトリクス（%B 二軸）', font=dict(color='white', size=16)),
+            height=500,
+            paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+            font=dict(color='white', family='Arial'),
+            xaxis=dict(title='PER %B（← 割安 | 割高 →）', gridcolor='#1e1e30',
+                       range=[-0.1, 1.1], tickformat='.1f'),
+            yaxis=dict(title='EV/EBITDA %B（← 割安 | 割高 →）', gridcolor='#1e1e30',
+                       range=[-0.1, 1.1], tickformat='.1f'),
+            margin=dict(l=70, r=20, t=60, b=60),
+            legend=dict(orientation='h', y=-0.15, bgcolor='rgba(0,0,0,0)')
+        )
+
+# ─── fig_peer: ピアー比較（チャート⑦）
+print("ピアー比較データ取得中...")
+ticker_symbol = TICKER_SYM
+peers = ['LLY', 'NVO', 'ABBV', 'PFE', 'MRK', 'JNJ']
+peer_data = []
+for sym in peers:
+    try:
+        t = yf.Ticker(sym)
+        i = t.info
+        ev = i.get('enterpriseValue')
+        eb = i.get('ebitda')
+        mc = i.get('marketCap')
+        name = i.get('shortName', sym)[:20]
+        fpe = i.get('forwardPE')
+        eg = i.get('earningsGrowth')
+        if ev and eb and ev > 0 and eb > 0:
+            peer_data.append({
+                'ticker': sym, 'name': name,
+                'ev_ebitda': ev / eb,
+                'fpe': fpe,
+                'eg': eg * 100 if eg else None,
+                'mktcap': mc
+            })
+            print(f"  {sym}: EV/EBITDA={ev/eb:.1f}x fPE={fpe}")
+    except Exception as e:
+        print(f"  {sym} エラー: {e}")
+
+fig_peer = None
+avg_ev = 0.0
+if len(peer_data) >= 2:
+    peer_data.sort(key=lambda x: x['ev_ebitda'], reverse=True)
+    peer_names  = [f"{d['ticker']}" for d in peer_data]
+    peer_values = [d['ev_ebitda'] for d in peer_data]
+    peer_colors = ['#ff6b35' if d['ticker'] == ticker_symbol else '#00d4ff' for d in peer_data]
+
+    fig_peer = go.Figure()
+    fig_peer.add_trace(go.Bar(
+        y=peer_names, x=peer_values,
+        orientation='h',
+        marker_color=peer_colors,
+        text=[f'{v:.1f}x' for v in peer_values],
+        textposition='outside',
+        textfont=dict(color='white', size=12),
+        name='EV/EBITDA',
+        hovertemplate='%{y}: %{x:.1f}x<extra></extra>'
+    ))
+    avg_ev = sum(peer_values) / len(peer_values)
+    fig_peer.add_vline(x=avg_ev, line=dict(color='#ffd700', width=1.5, dash='dash'),
+        annotation_text=f'平均 {avg_ev:.1f}x',
+        annotation_font_color='#ffd700', annotation_position='top')
+
+    fig_peer.update_layout(
+        title=dict(text='EV/EBITDA ピアー比較（製薬大手）', font=dict(color='white', size=16)),
+        height=360,
+        paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+        font=dict(color='white', family='Arial'),
+        xaxis=dict(title='EV/EBITDA (倍)', gridcolor='#1e1e30', ticksuffix='x'),
+        yaxis=dict(gridcolor='#1e1e30'),
+        margin=dict(l=80, r=60, t=60, b=40),
+        showlegend=False
+    )
+
 # ════════════════════════════════════════════════════════════════════════
 # 10. HTML パーツ生成
 # ════════════════════════════════════════════════════════════════════════
@@ -721,6 +1049,10 @@ chart_vol_html   = fig3_fc.to_html(full_html=False, include_plotlyjs=False,
                                    div_id='chart-vol')
 chart_obv_html   = fig4_fc.to_html(full_html=False, include_plotlyjs=False,
                                    div_id='chart-obv')
+
+chart_ee_html     = fig_ee.to_html(full_html=False, include_plotlyjs=False, div_id='chart-ev-ebitda') if fig_ee else ''
+chart_matrix_html = fig_matrix.to_html(full_html=False, include_plotlyjs=False, div_id='chart-matrix') if fig_matrix else ''
+chart_peer_html   = fig_peer.to_html(full_html=False, include_plotlyjs=False, div_id='chart-peer') if fig_peer else ''
 
 # ─── PER 判定
 if cur_pctb < 0.2:
@@ -816,6 +1148,43 @@ def fmt_ret(price):
     col  = '#00ff88' if r > 0 else '#ff4444' if r < 0 else '#ffd700'
     sign = '+' if r > 0 else ''
     return f'<span style="color:{col}">{sign}{r:.1f}%</span>'
+
+# ─── EV/EBITDA セクション HTML 生成
+if has_ev_ebitda:
+    _ee_judge = ('割安ゾーン — EV/EBITDAベースでも買いシグナル点灯' if cur_ee_pctb < 0.2
+                 else '割安寄り — 統計的に有利な水準' if cur_ee_pctb < 0.4
+                 else 'フェアバリュー付近' if cur_ee_pctb < 0.6
+                 else 'やや割高')
+    ev_ebitda_bb_html = (
+        f'<div class="cc"><div class="ct">EV/EBITDA ボリンジャーバンド</div>'
+        f'<div class="cd">日次EV（時価総額+純負債）÷ TTM EBITDA に 52日BB(±2σ)を適用。%B &lt; 0.2 = 統計的割安</div>'
+        + chart_ee_html
+        + f'<div class="ib"><strong>現在 EV/EBITDA {cur_ee:.1f}x</strong>'
+        f'（BB中央 {cur_ee_ma:.1f}x / %B={cur_ee_pctb:.2f}）。{_ee_judge}</div></div>'
+    )
+else:
+    ev_ebitda_bb_html = '<div class="cc"><div class="cd" style="color:var(--dim)">EV/EBITDAデータ取得不可</div></div>'
+
+ev_matrix_html = ''
+if fig_matrix:
+    ev_matrix_html = (
+        '<div class="cc"><div class="ct">PER × EV/EBITDA マトリクス</div>'
+        '<div class="cd">両指標の%Bを二軸にプロット。左下=◎強い買い、右上=✕見送り。星印が現在位置。</div>'
+        + chart_matrix_html + '</div>'
+    )
+
+ev_peer_html = ''
+if fig_peer:
+    _peer_list = '、'.join([f'<strong>{d["ticker"]}</strong>: {d["ev_ebitda"]:.1f}x' for d in peer_data])
+    _lly_idx = next((i for i, d in enumerate(peer_data) if d['ticker'] == ticker_symbol), None)
+    _lly_vs_avg = '割高' if (_lly_idx is not None and peer_data[_lly_idx]['ev_ebitda'] > avg_ev) else '割安'
+    ev_peer_html = (
+        '<div class="cc"><div class="ct">EV/EBITDA ピアー比較</div>'
+        '<div class="cd">製薬大手6社の現在EV/EBITDA。オレンジ=LLY。業界平均との乖離を確認。</div>'
+        + chart_peer_html
+        + f'<div class="ib">{_peer_list}。'
+        f'LLYは業界平均{avg_ev:.1f}xに対して{_lly_vs_avg}。GLP-1成長プレミアムを反映。</div></div>'
+    )
 
 # ════════════════════════════════════════════════════════════════════════
 # 11. HTML 出力
@@ -1112,6 +1481,18 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
   <div style="margin-bottom:28px">
     {event_cards}
   </div>
+
+  <!-- EV/EBITDA 分析 -->
+  <div class="sec">EV/EBITDA 分析</div>
+
+  <!-- ① BB チャート -->
+  {ev_ebitda_bb_html}
+
+  <!-- ② マトリクス -->
+  {ev_matrix_html}
+
+  <!-- ③ ピアー比較 -->
+  {ev_peer_html}
 
   <!-- ⑨ ファンダメンタルズ（カタリスト + リスク） -->
   <div class="sec">ファンダメンタルズ分析</div>
