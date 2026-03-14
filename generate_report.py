@@ -370,8 +370,10 @@ def build_ttm_ebitda(close_index, ebitda_q, ebitda_annual):
         past_q = ebitda_q[ebitda_q.index <= date]
         if len(past_q) >= 4:
             last_4 = past_q.iloc[-4:]
-            if last_4.notna().sum() >= 3:
-                ttm = last_4.sum()
+            valid_count = last_4.notna().sum()
+            if valid_count >= 3:
+                # NaNがある場合は平均で補完（3四半期合計 × 4/3）
+                ttm = last_4.sum() * (4 / valid_count)
                 if ttm > 0:
                     result[date] = ttm
                     continue
