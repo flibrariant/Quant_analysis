@@ -550,61 +550,165 @@ except Exception as e:
 
 # ─── Chart 6: 四半期業績チャート ───
 html_earnings = ""
+html_progress = ""
 try:
     if not q_inc.empty:
         cols = sorted(q_inc.columns, key=lambda c: pd.to_datetime(c))
-        # 最新12四半期まで
         cols = cols[-12:]
-        labels = []
-        rev_vals = []
-        op_vals  = []
-        ni_vals  = []
+
+        # ── FY判定（トヨタは4月〜3月決算）
+        def get_fy(dt):
+            return dt.year if dt.month <= 3 else dt.year + 1
+
+        labels, rev_vals, op_vals, ni_vals = [], [], [], []
+        q_meta = []  # (label, fy, q_in_fy, op_val_raw, rev_val_raw, ni_val_raw)
+
         for col in cols:
             dt = pd.to_datetime(col)
-            label = f"{str(dt.year)[2:]}Q{(dt.month-1)//3+1}"
+            fy = get_fy(dt)
+            q_in_fy = ((dt.month - 1) // 3) % 4 + 1  # Q1〜Q4
+            label = f"FY{str(fy)[2:]} Q{q_in_fy}"
             labels.append(label)
-            # 売上高
-            rev = None
+
+            rev = op = ni = None
             for k in ["Total Revenue", "Revenue"]:
                 if k in q_inc.index and pd.notna(q_inc.loc[k, col]):
-                    rev = float(q_inc.loc[k, col]) / 1e12  # 兆円
-                    break
-            rev_vals.append(rev)
-            # 営業利益
-            op = None
+                    rev = float(q_inc.loc[k, col]); break
             for k in ["Operating Income", "Operating Revenue"]:
                 if k in q_inc.index and pd.notna(q_inc.loc[k, col]):
-                    op = float(q_inc.loc[k, col]) / 1e11  # 千億円
-                    break
-            op_vals.append(op)
-            # 純利益
-            ni = None
+                    op = float(q_inc.loc[k, col]); break
             for k in ["Net Income", "Net Income Common Stockholders"]:
                 if k in q_inc.index and pd.notna(q_inc.loc[k, col]):
-                    ni = float(q_inc.loc[k, col]) / 1e11
-                    break
-            ni_vals.append(ni)
+                    ni = float(q_inc.loc[k, col]); break
+
+            rev_vals.append(rev / 1e12 if rev else None)
+            op_vals.append(op / 1e11 if op else None)
+            ni_vals.append(ni / 1e11 if ni else None)
+            q_meta.append((label, fy, q_in_fy, op, rev, ni))
 
         fig_earnings = go.Figure()
         if any(v is not None for v in rev_vals):
-            fig_earnings.add_trace(go.Bar(
-                x=labels, y=rev_vals, name="売上高（兆円）",
-                marker_color=AC,
-            ))
+            fig_earnings.add_trace(go.Bar(x=labels, y=rev_vals, name="売上高（兆円）", marker_color=AC))
         if any(v is not None for v in op_vals):
-            fig_earnings.add_trace(go.Bar(
-                x=labels, y=op_vals, name="営業利益（千億円）",
-                marker_color=GR,
-            ))
+            fig_earnings.add_trace(go.Bar(x=labels, y=op_vals, name="営業利益（千億円）", marker_color=GR))
         if any(v is not None for v in ni_vals):
-            fig_earnings.add_trace(go.Bar(
-                x=labels, y=ni_vals, name="純利益（千億円）",
-                marker_color=AC3,
-            ))
+            fig_earnings.add_trace(go.Bar(x=labels, y=ni_vals, name="純利益（千億円）", marker_color=AC3))
         fig_earnings.update_layout(barmode="group")
         apply_layout(fig_earnings, height=360, yaxis_title="金額（兆/千億円）")
         html_earnings = safe_html(fig_earnings, "chart-earnings")
         print("  Chart 6 (earnings) OK")
+
+        # ── 目標達成率チャート ─────────────────────────────────────────
+        # 通期目標: 過去FYは income_stmt 実績、今期FYはアナリスト推計
+        fy_targets = {}  # fy → {'op': 兆円, 'rev': 兆円, 'ni': 兆円}
+        try:
+            if not inc.empty:
+                for col in inc.columns:
+                    dt = pd.to_datetime(col)
+                    fy = get_fy(dt)
+                    op_a = rev_a = ni_a = None
+                    for k in ["Operating Income"]:
+                        if k in inc.index and pd.notna(inc.loc[k, col]):
+                            op_a = float(inc.loc[k, col]); break
+                    for k in ["Total Revenue", "Revenue"]:
+                        if k in inc.index and pd.notna(inc.loc[k, col]):
+                            rev_a = float(inc.loc[k, col]); break
+                    for k in ["Net Income", "Net Income Common Stockholders"]:
+                        if k in inc.index and pd.notna(inc.loc[k, col]):
+                            ni_a = float(inc.loc[k, col]); break
+                    if op_a or rev_a:
+                        fy_targets[fy] = {'op': op_a, 'rev': rev_a, 'ni': ni_a}
+        except Exception:
+            pass
+
+        # 今期FY（最新四半期のFY）のアナリスト推計を追加
+        current_fy = max(m[1] for m in q_meta) if q_meta else None
+        if current_fy and current_fy not in fy_targets:
+            try:
+                est = ticker.earnings_estimate
+                rev_est = ticker.revenue_estimate
+                shares_count = info.get('marketCap', 0) / info.get('currentPrice', 1)
+                if est is not None and '0y' in est.index:
+                    eps_est = float(est.loc['0y', 'avg']) if pd.notna(est.loc['0y', 'avg']) else None
+                    ni_est = eps_est * shares_count if eps_est else None
+                else:
+                    ni_est = None
+                rev_est_val = None
+                if rev_est is not None and '0y' in rev_est.index:
+                    rev_est_val = float(rev_est.loc['0y', 'avg']) if pd.notna(rev_est.loc['0y', 'avg']) else None
+                # 営業利益推計 = 売上高推計 × 直近実績営業利益率
+                op_margin = info.get('operatingMargins', None)
+                op_est = rev_est_val * op_margin if (rev_est_val and op_margin) else None
+                if op_est or rev_est_val:
+                    fy_targets[current_fy] = {'op': op_est, 'rev': rev_est_val, 'ni': ni_est}
+                    print(f"  今期FY{current_fy}目標: 売上¥{rev_est_val/1e12:.1f}兆 営業利益¥{op_est/1e12:.1f}兆" if op_est and rev_est_val else "  今期FY推計取得")
+            except Exception as e:
+                print(f"  今期FY推計取得エラー: {e}")
+
+        # 達成率を計算（FYごとに累積）
+        if fy_targets:
+            # FYごとに累積op/revを集計
+            fy_cumul = {}  # fy → [(q_label, cum_op_pct, cum_rev_pct)]
+            fy_op_acc = {}; fy_rev_acc = {}
+            for label, fy, q_in_fy, op_raw, rev_raw, ni_raw in q_meta:
+                if fy not in fy_targets:
+                    continue
+                target = fy_targets[fy]
+                fy_op_acc.setdefault(fy, 0.0)
+                fy_rev_acc.setdefault(fy, 0.0)
+                if op_raw:
+                    fy_op_acc[fy] += op_raw
+                if rev_raw:
+                    fy_rev_acc[fy] += rev_raw
+                op_pct  = (fy_op_acc[fy]  / target['op']  * 100) if (target.get('op')  and target['op']  > 0) else None
+                rev_pct = (fy_rev_acc[fy] / target['rev'] * 100) if (target.get('rev') and target['rev'] > 0) else None
+                fy_cumul.setdefault(fy, []).append((label, op_pct, rev_pct, q_in_fy))
+
+            if fy_cumul:
+                fig_progress = go.Figure()
+                colors_fy = [AC, AC2, AC3, GR, '#9b59b6']
+                for i, (fy, pts) in enumerate(sorted(fy_cumul.items())):
+                    lbs   = [p[0] for p in pts]
+                    op_ps = [p[1] for p in pts]
+                    rv_ps = [p[2] for p in pts]
+                    col_  = colors_fy[i % len(colors_fy)]
+                    is_current = (fy == current_fy)
+                    lw = 2.5 if is_current else 1.5
+                    dash_ = 'solid' if is_current else 'dot'
+                    label_suffix = '（今期・予想ベース）' if is_current else '（実績ベース）'
+                    if any(v is not None for v in op_ps):
+                        fig_progress.add_trace(go.Scatter(
+                            x=[f"Q{p[3]}" for p in pts], y=op_ps,
+                            mode='lines+markers',
+                            name=f'FY{str(fy)[2:]} 営業利益{label_suffix}',
+                            line=dict(color=col_, width=lw, dash=dash_),
+                            marker=dict(size=8),
+                            connectgaps=True,
+                            hovertemplate=f'FY{str(fy)[2:]} %{{x}}<br>累計達成率: %{{y:.1f}}%<extra></extra>'
+                        ))
+
+                # ペース基準線（25%/50%/75%/100%）
+                for q, pct in [(1, 25), (2, 50), (3, 75), (4, 100)]:
+                    fig_progress.add_annotation(
+                        x=f"Q{q}", y=pct,
+                        text=f'{pct}%', showarrow=False,
+                        font=dict(color='rgba(255,255,255,0.3)', size=10),
+                        xanchor='left', yanchor='bottom'
+                    )
+                for pct in [25, 50, 75, 100]:
+                    fig_progress.add_hline(
+                        y=pct, line=dict(color='rgba(255,255,255,0.12)', width=1, dash='dot')
+                    )
+                fig_progress.update_layout(
+                    xaxis=dict(categoryorder='array', categoryarray=['Q1','Q2','Q3','Q4'])
+                )
+                apply_layout(fig_progress, height=360,
+                             title="営業利益 通期目標達成率（累計進捗）",
+                             yaxis_title="達成率（%）")
+                html_progress = safe_html(fig_progress, "chart-progress")
+                print(f"  Chart 6b (progress) OK: FY={sorted(fy_cumul.keys())}")
+        else:
+            print("  Chart 6b (progress): 目標データ不足でスキップ")
     else:
         print("  Chart 6 (earnings): skipped (no quarterly data)")
 except Exception as e:
@@ -973,6 +1077,13 @@ if html_earnings:
         "売上高（兆円）・営業利益・純利益（千億円）",
         html_earnings,
         "売上高と利益の方向性が一致し、利益率が改善傾向にあるかを確認。"
+    ))
+if html_progress:
+    body_sections.append(card(
+        "営業利益 通期目標達成率",
+        "四半期ごとの累計営業利益を通期目標（過去FYは実績、今期FYはアナリスト予想）で割った進捗率。Q3時点で75%超なら概ね順調。",
+        html_progress,
+        "実線＝今期（予想ベース）、点線＝過去FY（実績ベース）。Q1〜Q4の達成ペースを過去と比較。"
     ))
 
 # ピアー
