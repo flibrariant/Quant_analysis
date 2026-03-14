@@ -864,55 +864,61 @@ fig4_fc.update_layout(
     yaxis=dict(gridcolor='#1e1e30', title='OBV'),
 )
 
-# ─── fig_ee: EV/EBITDA ボリンジャーバンド（チャート⑤）
+# ─── fig_ee: EV/EBITDA ボリンジャーバンド（チャート⑤ — BBバンド部分）
+# ─── fig_ee_pctb: EV/EBITDA %B（チャート⑤b — 独立Figure）
 fig_ee = None
+fig_ee_pctb = None
 if has_ev_ebitda:
-    fig_ee = make_subplots(rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.72, 0.28], vertical_spacing=0.06,
-        subplot_titles=('EV/EBITDA ボリンジャーバンド（52日±2σ）', '%B（BBバンド内の位置）'))
-
+    # BBバンドチャート
+    fig_ee = go.Figure()
     fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['upper']),
         mode='lines', line=dict(color='rgba(255,107,53,0.4)', width=1),
-        name=f'BB上限 {cur_ee_up:.1f}x'), row=1, col=1)
+        name=f'BB上限 {cur_ee_up:.1f}x'))
     fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['lower']),
         mode='lines', line=dict(color='rgba(255,107,53,0.4)', width=1),
         fill='tonexty', fillcolor='rgba(255,107,53,0.15)',
-        name=f'BB下限 {cur_ee_lo:.1f}x'), row=1, col=1)
+        name=f'BB下限 {cur_ee_lo:.1f}x'))
     fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['ma']),
         mode='lines', line=dict(color='#ffd700', width=1.5, dash='dash'),
-        name=f'BB中央 {cur_ee_ma:.1f}x'), row=1, col=1)
+        name=f'BB中央 {cur_ee_ma:.1f}x'))
     fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['ee']),
         mode='lines', line=dict(color='#ff6b35', width=2.5),
         name=f'EV/EBITDA {cur_ee:.1f}x',
-        hovertemplate='EV/EBITDA: %{y:.1f}x<extra></extra>'), row=1, col=1)
+        hovertemplate='EV/EBITDA: %{y:.1f}x<extra></extra>'))
     fig_ee.add_annotation(x=ee_plot.index[-1], y=cur_ee,
         text=f'現在 {cur_ee:.1f}x', showarrow=True, arrowhead=2,
         arrowcolor='#ff6b35', ax=-60, ay=-30,
         font=dict(color='white', size=12), bgcolor='#1a1a2e',
-        bordercolor='#ff6b35', borderwidth=1, row=1, col=1)
-
-    fig_ee.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['pct_b']),
-        mode='lines', line=dict(color='#ff6b35', width=2),
-        fill='tozeroy', fillcolor='rgba(255,107,53,0.12)',
-        name=f'%B = {cur_ee_pctb:.2f}'), row=2, col=1)
-    for lvl, col in [(1.0,'#ff4444'),(0.8,'#ff9944'),(0.5,'#ffd700'),(0.2,'#44ff88'),(0.0,'#44ff88')]:
-        fig_ee.add_hline(y=lvl, line=dict(color=col, width=0.8, dash='dash'), row=2, col=1)
-    fig_ee.add_hrect(y0=0.8, y1=1.2, fillcolor='rgba(255,68,68,0.08)', line_width=0,
-        row=2, col=1, annotation_text='割高', annotation_font_color='#ff4444', annotation_position='right')
-    fig_ee.add_hrect(y0=-0.2, y1=0.2, fillcolor='rgba(68,255,136,0.08)', line_width=0,
-        row=2, col=1, annotation_text='割安', annotation_font_color='#44ff88', annotation_position='right')
-
+        bordercolor='#ff6b35', borderwidth=1)
     ee_y_min = max(0, float(ee_plot[['ee','lower']].min().min()) * 0.90)
     ee_y_max = float(ee_plot[['ee','upper']].max().max()) * 1.08
-    fig_ee.update_yaxes(range=[ee_y_min, ee_y_max], tickformat='.0f', ticksuffix='x', row=1, col=1)
-    fig_ee.update_yaxes(range=[-0.15, 1.3], tickformat='.1f', row=2, col=1)
-    fig_ee.update_layout(height=600, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+    fig_ee.update_layout(
+        title=dict(text='EV/EBITDA ボリンジャーバンド（52日±2σ）', font=dict(color='white', size=16)),
+        height=400, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
         font=dict(color='white', family='Arial'),
-        legend=dict(orientation='h', y=1.03, bgcolor='rgba(0,0,0,0)', font_size=12),
-        margin=dict(l=70, r=20, t=50, b=20))
-    for r in range(1, 3):
-        fig_ee.update_xaxes(gridcolor='#1e1e30', row=r, col=1)
-        fig_ee.update_yaxes(gridcolor='#1e1e30', row=r, col=1)
+        legend=dict(orientation='h', y=1.05, bgcolor='rgba(0,0,0,0)', font_size=12),
+        margin=dict(l=70, r=20, t=50, b=40),
+        xaxis=dict(gridcolor='#1e1e30'),
+        yaxis=dict(gridcolor='#1e1e30', range=[ee_y_min, ee_y_max],
+                   tickformat='.0f', ticksuffix='x'))
+
+    # %Bチャート（独立Figure）
+    fig_ee_pctb = go.Figure()
+    fig_ee_pctb.add_trace(go.Scatter(x=list(ee_plot.index), y=list(ee_plot['pct_b']),
+        mode='lines', line=dict(color='#ff6b35', width=2),
+        fill='tozeroy', fillcolor='rgba(255,107,53,0.12)',
+        name=f'%B = {cur_ee_pctb:.2f}'))
+    for lvl, lc in [(1.0,'#ff4444'),(0.8,'#ff9944'),(0.5,'#ffd700'),(0.2,'#44ff88'),(0.0,'#44ff88')]:
+        fig_ee_pctb.add_hline(y=lvl, line=dict(color=lc, width=0.8, dash='dash'))
+    fig_ee_pctb.update_layout(
+        title=dict(text='EV/EBITDA %B（BBバンド内の位置）', font=dict(color='white', size=14)),
+        height=260, paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
+        font=dict(color='white', family='Arial'),
+        showlegend=True,
+        legend=dict(orientation='h', y=1.05, bgcolor='rgba(0,0,0,0)', font_size=11),
+        margin=dict(l=70, r=20, t=40, b=40),
+        xaxis=dict(gridcolor='#1e1e30'),
+        yaxis=dict(gridcolor='#1e1e30', range=[-0.15, 1.3], tickformat='.1f'))
 
 # ─── fig_matrix: PER × EV/EBITDA 二軸マトリクス（チャート⑥）
 fig_matrix = None
@@ -1051,6 +1057,7 @@ chart_obv_html   = fig4_fc.to_html(full_html=False, include_plotlyjs=False,
                                    div_id='chart-obv')
 
 chart_ee_html     = fig_ee.to_html(full_html=False, include_plotlyjs=False, div_id='chart-ev-ebitda') if fig_ee else ''
+chart_ee_pctb_html = fig_ee_pctb.to_html(full_html=False, include_plotlyjs=False, div_id='chart-ev-ebitda-pctb') if fig_ee_pctb else ''
 chart_matrix_html = fig_matrix.to_html(full_html=False, include_plotlyjs=False, div_id='chart-matrix') if fig_matrix else ''
 chart_peer_html   = fig_peer.to_html(full_html=False, include_plotlyjs=False, div_id='chart-peer') if fig_peer else ''
 
@@ -1159,6 +1166,7 @@ if has_ev_ebitda:
         f'<div class="cc"><div class="ct">EV/EBITDA ボリンジャーバンド</div>'
         f'<div class="cd">日次EV（時価総額+純負債）÷ TTM EBITDA に 52日BB(±2σ)を適用。%B &lt; 0.2 = 統計的割安</div>'
         + chart_ee_html
+        + chart_ee_pctb_html
         + f'<div class="ib"><strong>現在 EV/EBITDA {cur_ee:.1f}x</strong>'
         f'（BB中央 {cur_ee_ma:.1f}x / %B={cur_ee_pctb:.2f}）。{_ee_judge}</div></div>'
     )
