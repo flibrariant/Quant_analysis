@@ -791,7 +791,12 @@ except Exception as e:
 html_earnings = ""
 html_progress = ""
 try:
-    if not q_inc.empty:
+    # 四半期データに Revenue/Operating Income が含まれるか確認
+    Q_INC_KEYS = ["Total Revenue", "Revenue", "Operating Income", "Operating Revenue",
+                  "Net Income", "Net Income Common Stockholders"]
+    has_quarterly_income = not q_inc.empty and any(k in q_inc.index for k in Q_INC_KEYS)
+
+    if has_quarterly_income:
         cols = sorted(q_inc.columns, key=lambda c: pd.to_datetime(c))
         cols = cols[-12:]
 
@@ -952,7 +957,40 @@ try:
         else:
             print("  Chart 6b (progress): 目標データ不足でスキップ")
     else:
-        print("  Chart 6 (earnings): skipped (no quarterly data)")
+        # ── 年次データでフォールバック ──────────────────────────────────
+        print("  Chart 6 (earnings): quarterly income missing, falling back to annual")
+        if not inc.empty:
+            ann_cols = sorted(inc.columns, key=lambda c: pd.to_datetime(c))
+            ann_labels, ann_rev, ann_op, ann_ni = [], [], [], []
+            for col in ann_cols:
+                dt = pd.to_datetime(col)
+                fy = dt.year if dt.month <= 3 else dt.year + 1
+                ann_labels.append(f"FY{str(fy)[2:]}")
+                rv = op = ni = None
+                for k in ["Total Revenue", "Revenue"]:
+                    if k in inc.index and pd.notna(inc.loc[k, col]):
+                        rv = float(inc.loc[k, col]); break
+                for k in ["Operating Income"]:
+                    if k in inc.index and pd.notna(inc.loc[k, col]):
+                        op = float(inc.loc[k, col]); break
+                for k in ["Net Income", "Net Income Common Stockholders"]:
+                    if k in inc.index and pd.notna(inc.loc[k, col]):
+                        ni = float(inc.loc[k, col]); break
+                ann_rev.append(rv / 1e12 if rv else None)
+                ann_op.append(op / 1e11 if op else None)
+                ann_ni.append(ni / 1e11 if ni else None)
+
+            fig_earnings = go.Figure()
+            if any(v is not None for v in ann_rev):
+                fig_earnings.add_trace(go.Bar(x=ann_labels, y=ann_rev, name="売上高（兆円）", marker_color=AC))
+            if any(v is not None for v in ann_op):
+                fig_earnings.add_trace(go.Bar(x=ann_labels, y=ann_op, name="営業利益（千億円）", marker_color=GR))
+            if any(v is not None for v in ann_ni):
+                fig_earnings.add_trace(go.Bar(x=ann_labels, y=ann_ni, name="純利益（千億円）", marker_color=AC3))
+            fig_earnings.update_layout(barmode="group")
+            apply_layout(fig_earnings, height=360, yaxis_title="金額（兆/千億円）")
+            html_earnings = safe_html(fig_earnings, "chart-earnings")
+            print("  Chart 6 (earnings) OK: annual fallback")
 except Exception as e:
     print(f"  [WARN] Chart 6 (earnings): {e}")
     traceback.print_exc()
@@ -1285,25 +1323,38 @@ except Exception as e:
     traceback.print_exc()
 
 # ─── Chart 14: PER × EV/EBITDA マトリクス ───
+# 月次リサンプル: 日次では PER・EV/EBITDA 両方が株価に支配され対角線になるため
+# 月次にすることで四半期ごとの EPS / EBITDA 更新タイミング差が散布図に現れる
 try:
     if has_ev_ebitda and len(ee_plot) > 0:
-        # PER %B が必要（per_plot から再構築）
         per_series = close / annual_eps_series
         per_series = per_series[(per_series > 0) & (per_series < 200)].dropna()
-        if len(per_series) > 60:
-            per_df = per_series.to_frame('per')
-            per_df['ma']    = per_df['per'].rolling(52).mean()
-            per_df['std']   = per_df['per'].rolling(52).std()
-            per_df['upper'] = per_df['ma'] + 2 * per_df['std']
-            per_df['lower'] = per_df['ma'] - 2 * per_df['std']
-            per_df['pct_b'] = ((per_df['per'] - per_df['lower']) / (per_df['upper'] - per_df['lower'])).clip(-0.5, 1.5)
-            per_plot_m = per_df.dropna()
-
-            # 共通インデックスで結合
-            common = ee_plot.index.intersection(per_plot_m.index)
-            if len(common) > 20:
-                x_per  = [float(per_plot_m.loc[d, 'pct_b']) for d in common]
-                y_ee   = [float(ee_plot.loc[d, 'pct_b']) for d in common]
+        if len(per_series) > 12:
+            # 月次末でリサンプル（四半期更新タイミング差を可視化）
+            per_mo  = per_series.resample('ME').last().dropna()
+            ee_mo   = ev_ebitda_all.resample('ME').last().dropna()
+            # 共通月次インデックス
+            common_mo = per_mo.index.intersection(ee_mo.index)
+            if len(common_mo) > 6:
+                # 月次 BB (12ヶ月ウィンドウ)
+                per_mo_df = per_mo.reindex(common_mo).to_frame('per')
+                ee_mo_df  = ee_mo.reindex(common_mo).to_frame('ee')
+                WIN_M = min(24, len(common_mo) // 2)
+                for df_, col_ in [(per_mo_df, 'per'), (ee_mo_df, 'ee')]:
+                    df_['ma']    = df_[col_].rolling(WIN_M).mean()
+                    df_['std']   = df_[col_].rolling(WIN_M).std()
+                    df_['upper'] = df_['ma'] + 2 * df_['std']
+                    df_['lower'] = df_['ma'] - 2 * df_['std']
+                    df_['pct_b'] = ((df_[col_] - df_['lower']) / (df_['upper'] - df_['lower'])).clip(-0.5, 1.5)
+                per_mo_df = per_mo_df.dropna()
+                ee_mo_df  = ee_mo_df.dropna()
+                common = per_mo_df.index.intersection(ee_mo_df.index)
+            else:
+                common = pd.DatetimeIndex([])
+            per_plot_m = per_mo_df  # 現在値計算用に保持
+            if len(common) > 6:
+                x_per  = [float(per_mo_df.loc[d, 'pct_b']) for d in common]
+                y_ee   = [float(ee_mo_df.loc[d, 'pct_b']) for d in common]
                 colors = list(range(len(common)))
 
                 fig_matrix = go.Figure()
@@ -1348,7 +1399,7 @@ try:
                 html_ee_matrix = safe_html(fig_matrix, "chart-matrix")
                 print("  Chart 14 (matrix) OK")
         else:
-            print("  Chart 14 (matrix): skipped (insufficient PER data)")
+            print("  Chart 14 (matrix): skipped (insufficient monthly data)")
     else:
         print("  Chart 14 (matrix): skipped")
 except Exception as e:
