@@ -1321,7 +1321,13 @@ now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M JST")
 kpi_price = f"¥{cur_price:,.0f}" if cur_price else "N/A"
 kpi_per   = fmt_num(trailing_pe, 1, "倍") if trailing_pe else (fmt_num(forward_pe, 1, "倍(FWD)") if forward_pe else "N/A")
 kpi_pbr   = fmt_num(price_to_book, 2, "倍") if price_to_book else "N/A"
-kpi_div   = f"{dividend_yield*100:.2f}%" if dividend_yield else "N/A"
+# yfinanceは日本株のdividendYieldを%形式(2.82)で返すことがある。1超なら既に%値
+if dividend_yield:
+    kpi_div = f"{dividend_yield:.2f}%" if dividend_yield > 1 else f"{dividend_yield*100:.2f}%"
+elif dividend_rate and cur_price:
+    kpi_div = f"{dividend_rate/cur_price*100:.2f}%"
+else:
+    kpi_div = "N/A"
 kpi_roe   = fmt_pct(roe) if roe else "N/A"
 kpi_target = f"¥{target_mean:,.0f}" if target_mean else "N/A"
 
@@ -1527,6 +1533,166 @@ if html_mc:
         mc_insight,
     ))
 
+# ─────────────────────────────────────────
+# 分析結果サマリー
+# ─────────────────────────────────────────
+summary_rows = []
+
+def score_tag(label, value, color, sub=""):
+    s = f"<div class='sr-sub'>{sub}</div>" if sub else ""
+    return f'''<div class="sr-item">
+  <div class="sr-label">{label}</div>
+  <div class="sr-value" style="color:{color}">{value}</div>
+  {s}
+</div>'''
+
+def verdict_tag(text, cls):
+    return f'<span class="verdict {cls}">{text}</span>'
+
+# ── バリュエーション評価 ──
+val_items = []
+# PER
+if trailing_pe:
+    if trailing_pe < 10:
+        val_items.append(score_tag("PER (TTM)", f"{trailing_pe:.1f}倍", GR, "割安水準"))
+    elif trailing_pe < 20:
+        val_items.append(score_tag("PER (TTM)", f"{trailing_pe:.1f}倍", AC2, "適正水準"))
+    else:
+        val_items.append(score_tag("PER (TTM)", f"{trailing_pe:.1f}倍", AC3, "やや割高"))
+# PBR
+if price_to_book:
+    if price_to_book < 1.0:
+        val_items.append(score_tag("PBR", f"{price_to_book:.2f}倍", GR, "1倍割れ（TSE改革圧力）"))
+    elif price_to_book < 2.0:
+        val_items.append(score_tag("PBR", f"{price_to_book:.2f}倍", AC2, "適正水準"))
+    else:
+        val_items.append(score_tag("PBR", f"{price_to_book:.2f}倍", AC3, "やや割高"))
+# EV/EBITDA
+if has_ev_ebitda:
+    if cur_ee_pctb < 0.2:
+        val_items.append(score_tag("EV/EBITDA", f"{cur_ee:.1f}x", GR, f"%B={cur_ee_pctb:.2f} 割安ゾーン"))
+    elif cur_ee_pctb > 0.8:
+        val_items.append(score_tag("EV/EBITDA", f"{cur_ee:.1f}x", AC3, f"%B={cur_ee_pctb:.2f} 割高ゾーン"))
+    else:
+        val_items.append(score_tag("EV/EBITDA", f"{cur_ee:.1f}x", AC2, f"%B={cur_ee_pctb:.2f} 中立"))
+# 配当利回り
+if dividend_rate and cur_price:
+    dy = dividend_rate / cur_price * 100
+    dy_color = GR if dy >= 3.0 else (AC2 if dy >= 1.5 else TX)
+    val_items.append(score_tag("配当利回り", f"{dy:.2f}%", dy_color, "高配当" if dy >= 3.0 else ""))
+
+if val_items:
+    summary_rows.append(("バリュエーション評価", val_items))
+
+# ── テクニカル評価 ──
+tech_items = []
+# 株価 vs SMA200
+try:
+    sma200 = close.rolling(200).mean()
+    price_vs_sma200 = float(close.iloc[-1]) / float(sma200.iloc[-1]) - 1
+    c = GR if price_vs_sma200 > 0 else AC3
+    tech_items.append(score_tag("SMA200比", f"{price_vs_sma200:+.1%}", c,
+        "長期上昇トレンド維持" if price_vs_sma200 > 0 else "長期トレンド下方"))
+except Exception:
+    pass
+# OBV
+try:
+    if len(obv) > 20:
+        obv_chg = (float(obv.iloc[-1]) / float(obv.iloc[-20]) - 1) if float(obv.iloc[-20]) != 0 else 0
+        obv_c = GR if obv_chg > 0 else AC3
+        tech_items.append(score_tag("OBV (20日変化)", f"{obv_chg:+.1%}", obv_c,
+            "買い需要優勢" if obv_chg > 0 else "売り圧力継続"))
+except Exception:
+    pass
+
+if tech_items:
+    summary_rows.append(("テクニカル評価", tech_items))
+
+# ── フォワード評価 ──
+fwd_items = []
+# アップサイド
+if upside_pct is not None:
+    c = GR if upside_pct > 15 else (AC2 if upside_pct > 0 else AC3)
+    fwd_items.append(score_tag("目標株価アップサイド", f"{upside_pct:+.1f}%", c,
+        f"平均 ¥{target_mean:,.0f}" if target_mean else ""))
+# モンテカルロ
+if mc_up10_prob is not None:
+    c = GR if mc_up10_prob >= 40 else (AC2 if mc_up10_prob >= 25 else AC3)
+    fwd_items.append(score_tag("+10%超の確率 (30日)", f"{mc_up10_prob:.1f}%", c, "モンテカルロ N=2,000"))
+# EPS修正
+if eps_trend is not None:
+    try:
+        if '0y' in eps_trend.columns or 'current' in eps_trend.columns:
+            col = '0y' if '0y' in eps_trend.columns else 'current'
+            if 'consensusEpsEstimate' in eps_trend.index and '7daysAgo' in eps_trend.index:
+                cur_est = float(eps_trend.loc['consensusEpsEstimate', col])
+                wk1 = float(eps_trend.loc['7daysAgo', col])
+                if wk1 and cur_est:
+                    chg = (cur_est - wk1) / abs(wk1) * 100
+                    c = GR if chg > 0 else (AC3 if chg < -2 else AC2)
+                    fwd_items.append(score_tag("EPS修正 (7日)", f"{chg:+.1f}%", c,
+                        "上方修正トレンド" if chg > 0 else "下方修正注意"))
+    except Exception:
+        pass
+
+if fwd_items:
+    summary_rows.append(("フォワード評価", fwd_items))
+
+# ── 総合判定 ──
+buy_score = 0
+total_score = 0
+if trailing_pe and trailing_pe < 15: buy_score += 1
+if trailing_pe: total_score += 1
+if price_to_book and price_to_book < 1.5: buy_score += 1
+if price_to_book: total_score += 1
+if has_ev_ebitda and cur_ee_pctb < 0.5: buy_score += 1
+if has_ev_ebitda: total_score += 1
+if upside_pct is not None and upside_pct > 10: buy_score += 1
+if upside_pct is not None: total_score += 1
+if mc_up10_prob is not None and mc_up10_prob >= 35: buy_score += 1
+if mc_up10_prob is not None: total_score += 1
+try:
+    if len(obv) > 20 and float(obv.iloc[-1]) > float(obv.iloc[-20]): buy_score += 1
+    total_score += 1
+except Exception:
+    pass
+
+if total_score > 0:
+    ratio = buy_score / total_score
+    if ratio >= 0.6:
+        verdict_cls = "buy"
+        verdict_text = "買い / 中期強気"
+        verdict_color = GR
+        verdict_comment = "複数指標がポジティブを示唆。押し目での買い検討。"
+    elif ratio >= 0.4:
+        verdict_cls = "watch"
+        verdict_text = "様子見 / 中立"
+        verdict_color = AC2
+        verdict_comment = "強弱混在。トレンド確認後のエントリーが無難。"
+    else:
+        verdict_cls = "pass"
+        verdict_text = "見送り"
+        verdict_color = "#ff4444"
+        verdict_comment = "複数指標が弱気を示唆。リスク管理を優先。"
+else:
+    verdict_cls = "watch"
+    verdict_text = "データ不足"
+    verdict_color = AC2
+    verdict_comment = ""
+
+# サマリーHTMLを構築
+summary_html_parts = [section_html("分析結果サマリー")]
+summary_html_parts.append(f'<div class="summary-verdict">{verdict_tag(verdict_text, verdict_cls)}<span class="sv-comment">{verdict_comment}</span></div>')
+
+for title, items in summary_rows:
+    items_html = "".join(items)
+    summary_html_parts.append(f'''<div class="cc">
+  <div class="ct">{title}</div>
+  <div class="sr-grid">{items_html}</div>
+</div>''')
+
+body_sections.extend(summary_html_parts)
+
 body_html = "\n".join(body_sections)
 
 # ─── HTML テンプレート ───
@@ -1566,6 +1732,13 @@ a{{color:var(--ac);text-decoration:none}}
 .verdict.watch{{background:rgba(255,215,0,.1);color:var(--ac2);border:1px solid rgba(255,215,0,.3)}}
 .tag{{background:rgba(255,255,255,.06);border-radius:4px;padding:2px 8px;font-size:10px;margin-right:6px}}
 footer{{margin-top:60px;padding-top:24px;border-top:1px solid rgba(255,255,255,.06);font-size:11px;color:var(--dim);text-align:center;padding-bottom:32px}}
+.summary-verdict{{margin-bottom:20px;display:flex;align-items:center;gap:14px}}
+.sv-comment{{font-size:13px;color:var(--dim)}}
+.sr-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:8px}}
+.sr-item{{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:12px 16px}}
+.sr-label{{font-size:11px;color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}}
+.sr-value{{font-size:20px;font-weight:700}}
+.sr-sub{{font-size:11px;color:var(--dim);margin-top:2px}}
 @media(max-width:768px){{.grid2{{grid-template-columns:1fr}}.price-big{{font-size:28px}}.company-name{{font-size:20px}}}}
 </style>
 </head>
