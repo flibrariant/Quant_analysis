@@ -24,6 +24,16 @@ USD_JPY    = 158.94
 OUT_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", TICKER_SYM)
 OUT_FILE   = os.path.join(OUT_DIR, "index.html")
 
+# 銘柄別ピアーリスト
+PEER_MAP = {
+    'LLY':    ['NVO', 'ABBV', 'PFE', 'MRK', 'JNJ'],
+    '7203.T': ['7267.T', '7201.T', '7261.T', '7270.T', '7269.T'],  # Honda,Nissan,Mazda,Subaru,Suzuki
+}
+PEER_LABEL_MAP = {
+    'LLY':    '製薬大手',
+    '7203.T': '自動車大手（国内）',
+}
+
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ════════════════════════════════════════════════════════════════════════
@@ -45,8 +55,11 @@ close_1y = price_1y['Close']
 volume_1y = price_1y['Volume']
 
 info = ticker_obj.info
+CURRENCY = info.get('currency', 'USD')
+CURS     = '¥' if CURRENCY == 'JPY' else '$'
+PRICE_FMT = ',.0f' if CURRENCY == 'JPY' else ',.2f'
 cur_price = float(close_3y.iloc[-1])
-print(f"  現在株価: ${cur_price:.2f}")
+print(f"  現在株価: {CURS}{cur_price:{PRICE_FMT}}")
 
 # ════════════════════════════════════════════════════════════════════════
 # 2. 年次 EPS 取得（PER BB 長期化用）
@@ -549,7 +562,7 @@ days_3m = 63
 pct_1m  = np.percentile(paths[:, days_1m], [10, 25, 50, 75, 90])
 pct_3m  = np.percentile(paths[:, days_3m], [10, 25, 50, 75, 90])
 
-print(f"  1年後中央値: ${pct_50:.0f}  1ヶ月後中央値: ${pct_1m[2]:.0f}")
+print(f"  1年後中央値: {CURS}{pct_50:.0f}  1ヶ月後中央値: {CURS}{pct_1m[2]:.0f}")
 
 # ════════════════════════════════════════════════════════════════════════
 # 9. チャート生成
@@ -755,14 +768,14 @@ fig1_fc.add_trace(go.Scatter(
 
 fig1_fc.add_trace(go.Scatter(
     x=list(future_dates), y=list(band_50),
-    name=f'予測中央値 (${pct_50:.0f})', line=dict(color='#ff6b35', width=2.5, dash='dot')
+    name=f'予測中央値 ({CURS}{pct_50:.0f})', line=dict(color='#ff6b35', width=2.5, dash='dot')
 ))
 
 fig1_fc.add_hline(y=target_mean, line=dict(color='#ffd700', width=1, dash='dash'),
-                  annotation_text=f'アナリスト平均 ${target_mean:.0f}',
+                  annotation_text=f'アナリスト平均 {CURS}{target_mean:.0f}',
                   annotation_font_color='#ffd700', annotation_position='bottom right')
 fig1_fc.add_hline(y=target_high, line=dict(color='#00ff88', width=0.8, dash='dot'),
-                  annotation_text=f'強気目標 ${target_high:.0f}',
+                  annotation_text=f'強気目標 {CURS}{target_high:.0f}',
                   annotation_font_color='#00ff88', annotation_position='top right')
 
 for ev in events:
@@ -829,13 +842,13 @@ fig2_fc.add_trace(go.Histogram(
 
 for row in [1, 2]:
     fig2_fc.add_vline(x=cur_price, line=dict(color='white', width=2),
-                      annotation_text=f'現在値 ${cur_price:.0f}' if row == 1 else '',
+                      annotation_text=f'現在値 {CURS}{cur_price:.0f}' if row == 1 else '',
                       annotation_font_color='white', annotation_position='top right')
     fig2_fc.add_vline(x=target_mean, line=dict(color='#ffd700', width=1.5, dash='dash'),
-                      annotation_text=f'平均目標 ${target_mean:.0f}' if row == 1 else '',
+                      annotation_text=f'平均目標 {CURS}{target_mean:.0f}' if row == 1 else '',
                       annotation_font_color='#ffd700', annotation_position='top left')
     fig2_fc.add_vline(x=target_med, line=dict(color='#00ff88', width=1, dash='dot'),
-                      annotation_text=f'中央値 ${target_med:.0f}' if row == 1 else '',
+                      annotation_text=f'中央値 {CURS}{target_med:.0f}' if row == 1 else '',
                       annotation_font_color='#00ff88', annotation_position='bottom right')
 
 fig2_fc.update_layout(
@@ -1016,7 +1029,7 @@ if has_ev_ebitda and len(per_plot) > 0:
 # ─── fig_peer: ピアー比較（チャート⑦）
 print("ピアー比較データ取得中...")
 ticker_symbol = TICKER_SYM
-peers = ['LLY', 'NVO', 'ABBV', 'PFE', 'MRK', 'JNJ']
+peers = PEER_MAP.get(TICKER_SYM, ['LLY', 'NVO', 'ABBV', 'PFE', 'MRK', 'JNJ'])
 peer_data = []
 for sym in peers:
     try:
@@ -1065,7 +1078,7 @@ if len(peer_data) >= 2:
         annotation_font_color='#ffd700', annotation_position='top')
 
     fig_peer.update_layout(
-        title=dict(text='EV/EBITDA ピアー比較（製薬大手）', font=dict(color='white', size=16)),
+        title=dict(text=f'EV/EBITDA ピアー比較（{PEER_LABEL_MAP.get(TICKER_SYM, "同業他社")}）', font=dict(color='white', size=16)),
         height=360,
         paper_bgcolor='#0a0a1a', plot_bgcolor='#0a0a1a',
         font=dict(color='white', family='Arial'),
@@ -1399,14 +1412,15 @@ if fig_matrix:
 ev_peer_html = ''
 if fig_peer:
     _peer_list = '、'.join([f'<strong>{d["ticker"]}</strong>: {d["ev_ebitda"]:.1f}x' for d in peer_data])
-    _lly_idx = next((i for i, d in enumerate(peer_data) if d['ticker'] == ticker_symbol), None)
-    _lly_vs_avg = '割高' if (_lly_idx is not None and peer_data[_lly_idx]['ev_ebitda'] > avg_ev) else '割安'
+    _sym_idx  = next((i for i, d in enumerate(peer_data) if d['ticker'] == ticker_symbol), None)
+    _sym_vs_avg = '割高' if (_sym_idx is not None and peer_data[_sym_idx]['ev_ebitda'] > avg_ev) else '割安'
+    _peer_label = PEER_LABEL_MAP.get(TICKER_SYM, '同業他社')
     ev_peer_html = (
         '<div class="cc"><div class="ct">EV/EBITDA ピアー比較</div>'
-        '<div class="cd">製薬大手6社の現在EV/EBITDA。オレンジ=LLY。業界平均との乖離を確認。</div>'
+        f'<div class="cd">{_peer_label}の現在EV/EBITDA。オレンジ={TICKER_SYM}。業界平均との乖離を確認。</div>'
         + chart_peer_html
         + f'<div class="ib">{_peer_list}。'
-        f'LLYは業界平均{avg_ev:.1f}xに対して{_lly_vs_avg}。GLP-1成長プレミアムを反映。</div></div>'
+        f'{TICKER_SYM}は業界平均{avg_ev:.1f}xに対して{_sym_vs_avg}。</div></div>'
     )
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1580,7 +1594,7 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
     &thinsp;·&thinsp; yfinance + Plotly
   </div>
   <div class="price-hero">
-    <div class="p-main">${cur_price:.2f}</div>
+    <div class="p-main">{CURS}{cur_price:.2f}</div>
     <div class="p-sub">現在株価</div>
     <div class="p-jpy">¥{cur_price * USD_JPY:,.0f}</div>
   </div>
@@ -1593,7 +1607,7 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
   <div class="kgrid">
     <div class="kc">
       <div class="kl">現在株価</div>
-      <div class="kv">${cur_price:.2f}</div>
+      <div class="kv">{CURS}{cur_price:.2f}</div>
       <div class="ks">¥{cur_price * USD_JPY:,.0f} (@¥{USD_JPY:.0f})</div>
     </div>
     <div class="kc">
@@ -1623,13 +1637,13 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
     </div>
     <div class="kc">
       <div class="kl">アナリスト平均目標株価</div>
-      <div class="kv" style="font-size:21px">${target_mean:.0f}</div>
+      <div class="kv" style="font-size:21px">{CURS}{target_mean:.0f}</div>
       <div class="ks">上昇余地 +{(target_mean/cur_price-1)*100:.1f}% / {num_analysts}人</div>
     </div>
     <div class="kc">
       <div class="kl">1ヶ月後 中央値（MC）</div>
-      <div class="kv">${pct_1m[2]:.0f}</div>
-      <div class="ks">25%ile ${pct_1m[1]:.0f} — 75%ile ${pct_1m[3]:.0f}</div>
+      <div class="kv">{CURS}{pct_1m[2]:.0f}</div>
+      <div class="ks">25%ile {CURS}{pct_1m[1]:.0f} — 75%ile {CURS}{pct_1m[3]:.0f}</div>
     </div>
     <div class="kc">
       <div class="kl">ヒストリカルVol (30日)</div>
@@ -1688,7 +1702,7 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
       <strong>読み方</strong>：濃い青帯=50%信頼区間（25〜75%ile）、薄い青帯=90%信頼区間（5〜95%ile）。
       点線縦線は主要イベント（決算・FDA・学会）を示す。
       現時点のドリフト前提（アナリストコンセンサスベース）では
-      <strong>1年後中央値 ${pct_50:.0f}</strong>（現値比 {(pct_50/cur_price-1)*100:+.1f}%）。
+      <strong>1年後中央値 {CURS}{pct_50:.0f}</strong>（現値比 {(pct_50/cur_price-1)*100:+.1f}%）。
     </div>
   </div>
 
@@ -1699,10 +1713,10 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
     <div class="cd">上段=アナリスト目標の正規近似、下段=モンテカルロ1年後の終値分布（{N_SIM:,}本）</div>
     {chart_dist_html}
     <div class="ib">
-      アナリスト{num_analysts}人のレンジ: <strong style="color:#ff4444">${target_low:.0f}</strong>（弱気）〜
-      <strong style="color:#00ff88">${target_high:.0f}</strong>（強気）、
-      平均 <strong style="color:#ffd700">${target_mean:.0f}</strong>、中央値 <strong>${target_med:.0f}</strong>。
-      現在値${cur_price:.0f}はコンセンサスの下位寄りに位置しており、
+      アナリスト{num_analysts}人のレンジ: <strong style="color:#ff4444">{CURS}{target_low:.0f}</strong>（弱気）〜
+      <strong style="color:#00ff88">{CURS}{target_high:.0f}</strong>（強気）、
+      平均 <strong style="color:#ffd700">{CURS}{target_mean:.0f}</strong>、中央値 <strong>{CURS}{target_med:.0f}</strong>。
+      現在値{CURS}{cur_price:.0f}はコンセンサスの下位寄りに位置しており、
       <strong>上昇余地の方がダウンサイドより統計的に大きい</strong>局面。
     </div>
   </div>
@@ -1799,31 +1813,31 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
         <tr><th>シナリオ</th><th>価格</th><th>リターン</th><th>背景</th></tr>
         <tr>
           <td style="color:#00ff88">強気</td>
-          <td>${pct_1m[4]:.0f}</td>
+          <td>{CURS}{pct_1m[4]:.0f}</td>
           <td>{fmt_ret(pct_1m[4])}</td>
           <td style="color:var(--dim);font-size:11px">学会でポジティブ発言 + 機関買い</td>
         </tr>
         <tr>
           <td style="color:#00d4ff">中立強</td>
-          <td>${pct_1m[3]:.0f}</td>
+          <td>{CURS}{pct_1m[3]:.0f}</td>
           <td>{fmt_ret(pct_1m[3])}</td>
           <td style="color:var(--dim);font-size:11px">現状維持 + 緩やかな値戻し</td>
         </tr>
         <tr>
           <td style="color:#ffd700">基本</td>
-          <td>${pct_1m[2]:.0f}</td>
+          <td>{CURS}{pct_1m[2]:.0f}</td>
           <td>{fmt_ret(pct_1m[2])}</td>
           <td style="color:var(--dim);font-size:11px">MC中央値（ドリフト継続）</td>
         </tr>
         <tr>
           <td style="color:#ff9944">弱気</td>
-          <td>${pct_1m[1]:.0f}</td>
+          <td>{CURS}{pct_1m[1]:.0f}</td>
           <td>{fmt_ret(pct_1m[1])}</td>
           <td style="color:var(--dim);font-size:11px">テクニカル悪化 + 売り継続</td>
         </tr>
         <tr>
           <td style="color:#ff4444">ストレス</td>
-          <td>${pct_1m[0]:.0f}</td>
+          <td>{CURS}{pct_1m[0]:.0f}</td>
           <td>{fmt_ret(pct_1m[0])}</td>
           <td style="color:var(--dim);font-size:11px">市場全体のリスクオフ</td>
         </tr>
@@ -1835,31 +1849,31 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
         <tr><th>シナリオ</th><th>価格</th><th>リターン</th><th>背景</th></tr>
         <tr>
           <td style="color:#00ff88">強気</td>
-          <td>${pct_3m[4]:.0f}</td>
+          <td>{CURS}{pct_3m[4]:.0f}</td>
           <td>{fmt_ret(pct_3m[4])}</td>
           <td style="color:var(--dim);font-size:11px">Q1 beat + Orforglipron承認</td>
         </tr>
         <tr>
           <td style="color:#00d4ff">中立強</td>
-          <td>${pct_3m[3]:.0f}</td>
+          <td>{CURS}{pct_3m[3]:.0f}</td>
           <td>{fmt_ret(pct_3m[3])}</td>
           <td style="color:var(--dim);font-size:11px">Q1 beat + FDA pending</td>
         </tr>
         <tr>
           <td style="color:#ffd700">基本</td>
-          <td>${pct_3m[2]:.0f}</td>
+          <td>{CURS}{pct_3m[2]:.0f}</td>
           <td>{fmt_ret(pct_3m[2])}</td>
           <td style="color:var(--dim);font-size:11px">決算インライン + FDA Q2承認</td>
         </tr>
         <tr>
           <td style="color:#ff9944">弱気</td>
-          <td>${pct_3m[1]:.0f}</td>
+          <td>{CURS}{pct_3m[1]:.0f}</td>
           <td>{fmt_ret(pct_3m[1])}</td>
           <td style="color:var(--dim);font-size:11px">Q1 miss or FDA再延期</td>
         </tr>
         <tr>
           <td style="color:#ff4444">ストレス</td>
-          <td>${pct_3m[0]:.0f}</td>
+          <td>{CURS}{pct_3m[0]:.0f}</td>
           <td>{fmt_ret(pct_3m[0])}</td>
           <td style="color:var(--dim);font-size:11px">Q1 miss + FDA否決</td>
         </tr>
@@ -1890,11 +1904,11 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
     <div class="vbody">
       <p><strong>直近1ヶ月（〜4月）</strong>：大きなカタリストなし。
       テクニカル（50日MA下抜け）が重しで、$950〜1,020のボックス圏を想定。
-      MC中央値 <strong>${pct_1m[2]:.0f}</strong>。</p>
+      MC中央値 <strong>{CURS}{pct_1m[2]:.0f}</strong>。</p>
       <br>
       <p><strong>3ヶ月（Q1決算 + Orforglipron FDA）</strong>：
       4月決算 × 5月FDA承認のダブルカタリスト期。
-      両方ポジティブなら<strong style="color:#00ff88">${pct_3m[3]:.0f}〜{pct_3m[4]:.0f}（+{(pct_3m[3]/cur_price-1)*100:.0f}〜{(pct_3m[4]/cur_price-1)*100:.0f}%）</strong>も視野。
+      両方ポジティブなら<strong style="color:#00ff88">{CURS}{pct_3m[3]:.0f}〜{pct_3m[4]:.0f}（+{(pct_3m[3]/cur_price-1)*100:.0f}〜{(pct_3m[4]/cur_price-1)*100:.0f}%）</strong>も視野。
       FDA再延期なら$900割れリスク。<strong>バイナリーイベントに注意。</strong></p>
       <br>
       <p><strong>バリュエーション面</strong>：PER BB %B={cur_pctb:.2f}（{per_judge}）・フォワードPER ≈ 24x・PEG ≈ 1.1
@@ -1906,22 +1920,22 @@ body{{background:var(--bg);color:var(--tx);font-family:Arial,sans-serif}}
     <div class="esg">
       <div class="ei">
         <div class="el">1ヶ月後中央値</div>
-        <div class="ev">${pct_1m[2]:.0f}</div>
+        <div class="ev">{CURS}{pct_1m[2]:.0f}</div>
         <div style="font-size:10px;color:var(--dim);margin-top:5px">{fmt_ret(pct_1m[2])}</div>
       </div>
       <div class="ei">
         <div class="el">3ヶ月後中央値</div>
-        <div class="ev">${pct_3m[2]:.0f}</div>
+        <div class="ev">{CURS}{pct_3m[2]:.0f}</div>
         <div style="font-size:10px;color:var(--dim);margin-top:5px">{fmt_ret(pct_3m[2])}</div>
       </div>
       <div class="ei">
         <div class="el">アナリスト平均目標</div>
-        <div class="ev">${target_mean:.0f}</div>
+        <div class="ev">{CURS}{target_mean:.0f}</div>
         <div style="font-size:10px;color:var(--dim);margin-top:5px">{fmt_ret(target_mean)}</div>
       </div>
       <div class="ei">
         <div class="el">強気目標（FDA承認時）</div>
-        <div class="ev">${target_high:.0f}</div>
+        <div class="ev">{CURS}{target_high:.0f}</div>
         <div style="font-size:10px;color:var(--dim);margin-top:5px">{fmt_ret(target_high)}</div>
       </div>
     </div>
