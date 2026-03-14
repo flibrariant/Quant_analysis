@@ -371,7 +371,7 @@ def get_earnings_release_dates(ticker_obj, fiscal_dates):
     try:
         ed = ticker_obj.earnings_dates
         if ed is not None and not ed.empty:
-            ed.index = pd.to_datetime(ed.index).tz_localize(None)
+            ed.index = pd.to_datetime(ed.index).tz_localize(None).normalize()
             release_dates = sorted(ed.index.tolist())
             for fdate in fiscal_dates:
                 # fiscal end から30〜120日後の範囲で最も近い決算発表日を探す
