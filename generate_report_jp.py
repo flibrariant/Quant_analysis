@@ -240,6 +240,200 @@ except Exception as e:
     print(f"  [ERROR] eps_revisions: {e}")
     eps_rev = None
 
+# ─── OBV計算 ───
+obv = pd.Series(dtype=float)
+obv_ma20 = pd.Series(dtype=float)
+try:
+    if len(close) > 0 and len(volume) > 0:
+        obv_vals = []
+        obv_running = 0.0
+        cl = close.reindex(volume.index).ffill()
+        for i, (dt, vol) in enumerate(volume.items()):
+            if i == 0:
+                obv_running += float(vol)
+            else:
+                prev_close = float(cl.iloc[i - 1])
+                cur_close  = float(cl.loc[dt])
+                if cur_close > prev_close:
+                    obv_running += float(vol)
+                elif cur_close < prev_close:
+                    obv_running -= float(vol)
+            obv_vals.append(obv_running)
+        obv = pd.Series(obv_vals, index=volume.index)
+        obv_ma20 = obv.rolling(20).mean()
+except Exception as e:
+    print(f"  [WARN] OBV: {e}")
+
+# ─── EV/EBITDA データ取得 ───
+print("  EV/EBITDA データ取得中...")
+ebitda_q = pd.Series(dtype=float)
+try:
+    ebitda_keys = ['EBITDA', 'Normalized EBITDA']
+    for k in ebitda_keys:
+        if k in q_inc.index:
+            raw = q_inc.loc[k].dropna()
+            ebitda_q = pd.Series(
+                {pd.to_datetime(c).tz_localize(None): abs(float(v)) for c, v in raw.items()}
+            ).sort_index()
+            break
+    if ebitda_q.empty:
+        q_cf = ticker.quarterly_cashflow
+        da_keys = ['Depreciation And Amortization', 'Depreciation Amortization Depletion']
+        oi_keys = ['Operating Income', 'EBIT']
+        oi = da = None
+        for k in oi_keys:
+            if k in q_inc.index: oi = q_inc.loc[k]; break
+        for k in da_keys:
+            if k in q_cf.index: da = q_cf.loc[k]; break
+        if oi is not None and da is not None:
+            for col in oi.index:
+                dt = pd.to_datetime(col).tz_localize(None)
+                o_val = oi.get(col, np.nan)
+                d_val = da.get(col, np.nan)
+                if pd.notna(o_val) and pd.notna(d_val):
+                    ebitda_q[dt] = abs(float(o_val)) + abs(float(d_val))
+            ebitda_q = ebitda_q.sort_index()
+    print(f"  四半期EBITDA: {len(ebitda_q)}件")
+except Exception as e:
+    print(f"  EBITDA取得エラー: {e}")
+
+ebitda_annual = {}
+try:
+    ebitda_keys = ['EBITDA', 'Normalized EBITDA']
+    for k in ebitda_keys:
+        if k in inc.index:
+            for col, val in inc.loc[k].dropna().items():
+                ebitda_annual[pd.to_datetime(col).tz_localize(None)] = abs(float(val))
+            break
+    if not ebitda_annual:
+        a_cf = ticker.cashflow
+        da_keys = ['Depreciation And Amortization', 'Depreciation Amortization Depletion']
+        oi_keys = ['Operating Income', 'EBIT']
+        oi = da = None
+        for k in oi_keys:
+            if k in inc.index: oi = inc.loc[k]; break
+        for k in da_keys:
+            if k in a_cf.index: da = a_cf.loc[k]; break
+        if oi is not None and da is not None:
+            for col in oi.index:
+                dt = pd.to_datetime(col).tz_localize(None)
+                o_val = oi.get(col, np.nan)
+                d_val = da.get(col, np.nan)
+                if pd.notna(o_val) and pd.notna(d_val):
+                    ebitda_annual[dt] = abs(float(o_val)) + abs(float(d_val))
+    print(f"  年次EBITDA: {len(ebitda_annual)}件")
+except Exception as e:
+    print(f"  年次EBITDA取得エラー: {e}")
+
+net_debt_q = {}
+try:
+    debt_keys = ['Total Debt', 'Long Term Debt', 'Current Debt']
+    cash_keys = ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']
+    for col in q_bs.columns:
+        dt = pd.to_datetime(col).tz_localize(None)
+        debt = cash = 0.0
+        for k in debt_keys:
+            if k in q_bs.index and pd.notna(q_bs.loc[k, col]):
+                debt = abs(float(q_bs.loc[k, col])); break
+        for k in cash_keys:
+            if k in q_bs.index and pd.notna(q_bs.loc[k, col]):
+                cash = abs(float(q_bs.loc[k, col])); break
+        net_debt_q[dt] = debt - cash
+    net_debt_q = dict(sorted(net_debt_q.items()))
+except Exception as e:
+    print(f"  純負債取得エラー: {e}")
+
+# 決算発表日補正
+def get_release_dates(fiscal_dates):
+    release_map = {}
+    try:
+        if earn_dates is not None and not earn_dates.empty:
+            ed_idx = earn_dates.index.normalize()
+            rel_dates = sorted(ed_idx.tolist())
+            for fdate in fiscal_dates:
+                cands = [d for d in rel_dates
+                         if pd.Timedelta(days=30) <= (d - fdate) <= pd.Timedelta(days=120)]
+                if cands:
+                    release_map[fdate] = min(cands)
+    except Exception as e:
+        print(f"  発表日マップエラー: {e}")
+    for fdate in fiscal_dates:
+        if fdate not in release_map:
+            release_map[fdate] = fdate + pd.Timedelta(days=45)
+    return release_map
+
+fiscal_dates = list(ebitda_q.index)
+release_map = get_release_dates(fiscal_dates)
+ebitda_q_released = pd.Series(
+    {release_map[fd]: val for fd, val in ebitda_q.items()}, dtype=float
+).sort_index()
+
+def build_ttm_ebitda(close_index, ebitda_q_released, ebitda_annual):
+    result = {}
+    ann_dates = sorted(ebitda_annual.keys()) if ebitda_annual else []
+    for date in close_index:
+        past_q = ebitda_q_released[ebitda_q_released.index <= date]
+        if len(past_q) >= 4:
+            last_4 = past_q.iloc[-4:]
+            valid_count = last_4.notna().sum()
+            if valid_count >= 3:
+                ttm = last_4.sum() * (4 / valid_count)
+                if ttm > 0:
+                    result[date] = ttm
+                    continue
+        prev_d = [d for d in ann_dates if d <= date]
+        next_d = [d for d in ann_dates if d > date]
+        if prev_d and next_d:
+            d0, d1 = max(prev_d), min(next_d)
+            e0, e1 = ebitda_annual[d0], ebitda_annual[d1]
+            ratio = (date - d0).days / max((d1 - d0).days, 1)
+            ttm = e0 + (e1 - e0) * ratio
+            if ttm > 0: result[date] = ttm
+        elif prev_d:
+            ttm = ebitda_annual[max(prev_d)]
+            if ttm > 0: result[date] = ttm
+    return pd.Series(result)
+
+ttm_ebitda = build_ttm_ebitda(close.index, ebitda_q_released, ebitda_annual)
+
+ev_series = pd.Series(dtype=float)
+if shares_count and not close.empty:
+    mktcap_series = close * shares_count
+    if net_debt_q:
+        nd_series = pd.Series(net_debt_q).reindex(close.index, method='ffill')
+        ev_series = mktcap_series + nd_series
+    else:
+        ev_series = mktcap_series
+
+ev_ebitda_all = pd.Series(dtype=float)
+if not ev_series.empty and not ttm_ebitda.empty:
+    ev_ebitda_all = (ev_series / ttm_ebitda).dropna()
+    ev_ebitda_all = ev_ebitda_all[(ev_ebitda_all > 0) & (ev_ebitda_all < 200)]
+
+has_ev_ebitda = False
+ee_plot = pd.DataFrame()
+cur_ee = cur_ee_ma = cur_ee_up = cur_ee_lo = cur_ee_pctb = 0.0
+if len(ev_ebitda_all) > 60:
+    ee_df = ev_ebitda_all.to_frame('ee')
+    ee_df['ma']    = ee_df['ee'].rolling(52).mean()
+    ee_df['std']   = ee_df['ee'].rolling(52).std()
+    ee_df['upper'] = ee_df['ma'] + 2 * ee_df['std']
+    ee_df['lower'] = ee_df['ma'] - 2 * ee_df['std']
+    ee_df['pct_b'] = ((ee_df['ee'] - ee_df['lower']) / (ee_df['upper'] - ee_df['lower'])).clip(-0.5, 1.5)
+    ee_plot = ee_df.dropna()
+    if len(ee_plot) > 0:
+        cur_ee      = float(ee_plot['ee'].iloc[-1])
+        cur_ee_ma   = float(ee_plot['ma'].iloc[-1])
+        cur_ee_up   = float(ee_plot['upper'].iloc[-1])
+        cur_ee_lo   = float(ee_plot['lower'].iloc[-1])
+        cur_ee_pctb = float(ee_plot['pct_b'].iloc[-1])
+        has_ev_ebitda = True
+        print(f"  EV/EBITDA={cur_ee:.1f}x  MA={cur_ee_ma:.1f}x  %B={cur_ee_pctb:.2f}")
+    else:
+        print("  EV/EBITDAデータ不足（dropna後空）")
+else:
+    print(f"  EV/EBITDAデータ不足（{len(ev_ebitda_all)}点）")
+
 # ─── 年次EPS系列を構築（PERシリーズ用）───
 annual_eps_series = pd.Series(dtype=float)
 try:
@@ -970,6 +1164,152 @@ except Exception as e:
     print(f"  [WARN] Chart 11 (MC): {e}")
     traceback.print_exc()
 
+# ─── Chart 12: OBV需給 ───
+html_obv = ""
+try:
+    if len(obv) > 0:
+        fig_obv = go.Figure()
+        fig_obv.add_trace(go.Scatter(
+            x=list(obv.index), y=[float(v) for v in obv],
+            name='OBV', line=dict(color=GR, width=2),
+            hovertemplate='OBV: %{y:,.0f}<extra></extra>'
+        ))
+        fig_obv.add_trace(go.Scatter(
+            x=list(obv_ma20.index), y=[float(v) for v in obv_ma20.dropna()],
+            name='OBV MA20', line=dict(color=AC2, width=1.5, dash='dash')
+        ))
+        apply_layout(fig_obv, height=280, title='OBV（On-Balance Volume）— 需給トレンド', yaxis_title='OBV')
+        html_obv = safe_html(fig_obv, "chart-obv")
+        obv_trend = '上昇' if float(obv.iloc[-1]) > float(obv.iloc[-20]) else '下落'
+        obv_vs_ma  = float(obv.iloc[-1]) > float(obv_ma20.dropna().iloc[-1]) if len(obv_ma20.dropna()) > 0 else None
+        print("  Chart 12 (OBV) OK")
+    else:
+        print("  Chart 12 (OBV): skipped (no data)")
+except Exception as e:
+    print(f"  [WARN] Chart 12 (OBV): {e}")
+    traceback.print_exc()
+
+# ─── Chart 13: EV/EBITDA BBバンド ───
+html_ee = ""
+html_ee_pctb = ""
+html_ee_matrix = ""
+try:
+    if has_ev_ebitda:
+        fig_ee = go.Figure()
+        fig_ee.add_trace(go.Scatter(
+            x=list(ee_plot.index), y=list(ee_plot['upper']),
+            mode='lines', line=dict(color='rgba(255,107,53,0.4)', width=1),
+            name=f'BB上限 {cur_ee_up:.1f}x'))
+        fig_ee.add_trace(go.Scatter(
+            x=list(ee_plot.index), y=list(ee_plot['lower']),
+            mode='lines', line=dict(color='rgba(255,107,53,0.4)', width=1),
+            fill='tonexty', fillcolor='rgba(255,107,53,0.15)',
+            name=f'BB下限 {cur_ee_lo:.1f}x'))
+        fig_ee.add_trace(go.Scatter(
+            x=list(ee_plot.index), y=list(ee_plot['ma']),
+            mode='lines', line=dict(color=AC2, width=1.5, dash='dash'),
+            name=f'MA52 {cur_ee_ma:.1f}x'))
+        fig_ee.add_trace(go.Scatter(
+            x=list(ee_plot.index), y=list(ee_plot['ee']),
+            mode='lines', line=dict(color=AC, width=2),
+            name=f'EV/EBITDA {cur_ee:.1f}x',
+            hovertemplate='EV/EBITDA: %{y:.1f}x<extra></extra>'))
+        fig_ee.add_annotation(
+            x=ee_plot.index[-1], y=cur_ee,
+            text=f"現在 {cur_ee:.1f}x", showarrow=False,
+            font=dict(color=AC, size=11), xanchor='right', yanchor='bottom')
+        apply_layout(fig_ee, height=380, title=f'EV/EBITDA ボリンジャーバンド（52日±2σ）', yaxis_title='EV/EBITDA（倍）')
+        html_ee = safe_html(fig_ee, "chart-ev-ebitda")
+
+        # %B チャート
+        fig_ee_pctb = go.Figure()
+        fig_ee_pctb.add_trace(go.Scatter(
+            x=list(ee_plot.index), y=list(ee_plot['pct_b']),
+            mode='lines', line=dict(color=AC3, width=2),
+            name='%B', hovertemplate='%B: %{y:.2f}<extra></extra>'))
+        for lvl, lc in [(1.0, 'rgba(255,68,68,0.5)'), (0.8, 'rgba(255,107,53,0.4)'),
+                        (0.5, 'rgba(255,255,255,0.2)'), (0.2, 'rgba(0,255,136,0.4)'), (0.0, 'rgba(0,212,255,0.5)')]:
+            fig_ee_pctb.add_hline(y=lvl, line=dict(color=lc, width=0.8, dash='dash'))
+        apply_layout(fig_ee_pctb, height=240, title='EV/EBITDA %B（BBバンド内の位置）', yaxis_title='%B')
+        html_ee_pctb = safe_html(fig_ee_pctb, "chart-ev-ebitda-pctb")
+        print("  Chart 13 (EV/EBITDA BB) OK")
+    else:
+        print("  Chart 13 (EV/EBITDA BB): skipped")
+except Exception as e:
+    print(f"  [WARN] Chart 13 (EV/EBITDA BB): {e}")
+    traceback.print_exc()
+
+# ─── Chart 14: PER × EV/EBITDA マトリクス ───
+try:
+    if has_ev_ebitda and len(ee_plot) > 0:
+        # PER %B が必要（per_plot から再構築）
+        per_series = close / annual_eps_series
+        per_series = per_series[(per_series > 0) & (per_series < 200)].dropna()
+        if len(per_series) > 60:
+            per_df = per_series.to_frame('per')
+            per_df['ma']    = per_df['per'].rolling(52).mean()
+            per_df['std']   = per_df['per'].rolling(52).std()
+            per_df['upper'] = per_df['ma'] + 2 * per_df['std']
+            per_df['lower'] = per_df['ma'] - 2 * per_df['std']
+            per_df['pct_b'] = ((per_df['per'] - per_df['lower']) / (per_df['upper'] - per_df['lower'])).clip(-0.5, 1.5)
+            per_plot_m = per_df.dropna()
+
+            # 共通インデックスで結合
+            common = ee_plot.index.intersection(per_plot_m.index)
+            if len(common) > 20:
+                x_per  = [float(per_plot_m.loc[d, 'pct_b']) for d in common]
+                y_ee   = [float(ee_plot.loc[d, 'pct_b']) for d in common]
+                colors = list(range(len(common)))
+
+                fig_matrix = go.Figure()
+                fig_matrix.add_trace(go.Scatter(
+                    x=x_per, y=y_ee,
+                    mode='markers',
+                    marker=dict(
+                        color=colors, colorscale='Plasma', size=5,
+                        colorbar=dict(title='時系列（古→新）', tickfont=dict(color=TX)),
+                        opacity=0.7
+                    ),
+                    hovertemplate='PER %%B: %{x:.2f}<br>EV/EBITDA %%B: %{y:.2f}<extra></extra>'
+                ))
+                # 現在値
+                cur_per_pctb = float(per_plot_m['pct_b'].iloc[-1])
+                fig_matrix.add_trace(go.Scatter(
+                    x=[cur_per_pctb], y=[cur_ee_pctb],
+                    mode='markers+text',
+                    marker=dict(color=GR, size=14, symbol='star'),
+                    text=['現在'], textposition='top center',
+                    textfont=dict(color=GR, size=11), name='現在'
+                ))
+                for lv in [0.0, 0.5, 1.0]:
+                    fig_matrix.add_hline(y=lv, line=dict(color='rgba(255,255,255,0.12)', width=0.8, dash='dot'))
+                    fig_matrix.add_vline(x=lv, line=dict(color='rgba(255,255,255,0.12)', width=0.8, dash='dot'))
+                # 象限ラベル
+                for qx, qy, qt, qc in [
+                    (-0.3, 1.3, '割安PER\n割高EV', 'rgba(255,215,0,0.7)'),
+                    (1.3, 1.3, '割高PER\n割高EV', 'rgba(255,68,68,0.7)'),
+                    (-0.3, -0.3, '割安PER\n割安EV', 'rgba(0,255,136,0.7)'),
+                    (1.3, -0.3, '割高PER\n割安EV', 'rgba(0,212,255,0.7)'),
+                ]:
+                    fig_matrix.add_annotation(x=qx, y=qy, text=qt, showarrow=False,
+                        font=dict(size=9, color=qc), align='center')
+                apply_layout(fig_matrix, height=400,
+                    title='PER × EV/EBITDA マトリクス（%B 二軸）')
+                fig_matrix.update_layout(
+                    xaxis=dict(**CHART_LAYOUT['xaxis'], title='PER %B（← 割安 | 割高 →）'),
+                    yaxis=dict(**CHART_LAYOUT['yaxis'], title='EV/EBITDA %B（← 割安 | 割高 →）'),
+                    showlegend=False
+                )
+                html_ee_matrix = safe_html(fig_matrix, "chart-matrix")
+                print("  Chart 14 (matrix) OK")
+        else:
+            print("  Chart 14 (matrix): skipped (insufficient PER data)")
+    else:
+        print("  Chart 14 (matrix): skipped")
+except Exception as e:
+    print(f"  [WARN] Chart 14 (matrix): {e}")
+    traceback.print_exc()
+
 # ─────────────────────────────────────────
 # Section 3: HTML生成
 # ─────────────────────────────────────────
@@ -1087,6 +1427,48 @@ if html_progress:
         "四半期ごとの累計営業利益を通期目標（過去FYは実績、今期FYはアナリスト予想）で割った進捗率。Q3時点で75%超なら概ね順調。",
         html_progress,
         "実線＝今期（予想ベース）、点線＝過去FY（実績ベース）。Q1〜Q4の達成ペースを過去と比較。"
+    ))
+
+# 需給分析
+if html_obv:
+    body_sections.append(section_html("需給分析 — 出来高 & OBV"))
+    obv_insight = ""
+    try:
+        obv_dir = "上昇" if float(obv.iloc[-1]) > float(obv.iloc[-20]) else "下落"
+        obv_ma_txt = "OBV > MA20 → 買い需要が優勢。株価の上昇継続を示唆。" if obv_vs_ma else "OBV < MA20 → 売り圧力継続。短期的に慎重が必要。"
+        obv_insight = f"<strong>OBVリーディング</strong>：OBVが{obv_dir}トレンド。{obv_ma_txt}"
+    except Exception:
+        pass
+    body_sections.append(card(
+        "OBV（On-Balance Volume）— 需給トレンド",
+        "OBVは上昇日の出来高を累積加算・下落日を減算。上昇トレンド＝機関投資家の買い集め示唆。",
+        html_obv,
+        obv_insight,
+    ))
+
+# EV/EBITDA 時系列
+if html_ee or html_ee_pctb or html_ee_matrix:
+    body_sections.append(section_html("EV/EBITDA 分析"))
+if html_ee:
+    ee_judge = ('割安ゾーン — EV/EBITDAベースでも買いシグナル点灯' if cur_ee_pctb < 0.2
+                else '割高ゾーン — バリュエーション過熱注意' if cur_ee_pctb > 0.8
+                else '中立ゾーン — バンド中央付近')
+    body_sections.append(card(
+        f"EV/EBITDA ボリンジャーバンド（52日±2σ）",
+        "Enterprise Value ÷ EBITDA の時系列BBバンド。PERより資本構造の影響を受けにくく、設備産業の比較に有効。",
+        html_ee + (html_ee_pctb if html_ee_pctb else ""),
+        f"現在 {cur_ee:.1f}x（%B={cur_ee_pctb:.2f}）: {ee_judge}",
+    ))
+if html_ee_matrix:
+    try:
+        matrix_insight = f"現在の位置: PER%B={cur_per_pctb:.2f} / EV/EBITDA%B={cur_ee_pctb:.2f}"
+    except NameError:
+        matrix_insight = f"現在のEV/EBITDA%B={cur_ee_pctb:.2f}"
+    body_sections.append(card(
+        "PER × EV/EBITDA マトリクス（%B 二軸）",
+        "両指標の%B（BBバンド内の位置）を二軸散布図で可視化。左下＝双方割安、右上＝双方割高。色は古（青）→新（黄）の時系列。",
+        html_ee_matrix,
+        matrix_insight,
     ))
 
 # ピアー
