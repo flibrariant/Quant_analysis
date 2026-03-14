@@ -580,6 +580,46 @@ try:
 except Exception as e:
     print(f"  [WARN] Chart 2 (volume): {e}")
 
+# ─── Chart 2b: MACDチャート ───
+html_macd = ""
+try:
+    if len(close) > 40:
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal    = macd_line.ewm(span=9, adjust=False).mean()
+        histogram  = macd_line - signal
+
+        hist_colors = [GR if float(v) >= 0 else "#ff4444" for v in histogram]
+        fig_macd = go.Figure()
+        fig_macd.add_trace(go.Bar(
+            x=list(histogram.index), y=[float(v) for v in histogram],
+            name='ヒストグラム', marker_color=hist_colors, opacity=0.7,
+            hovertemplate='ヒストグラム: %{y:.2f}<extra></extra>'
+        ))
+        fig_macd.add_trace(go.Scatter(
+            x=list(macd_line.index), y=[float(v) for v in macd_line],
+            name='MACD', line=dict(color=AC, width=1.8),
+            hovertemplate='MACD: %{y:.2f}<extra></extra>'
+        ))
+        fig_macd.add_trace(go.Scatter(
+            x=list(signal.index), y=[float(v) for v in signal],
+            name='シグナル(9)', line=dict(color=AC3, width=1.5, dash='dash'),
+            hovertemplate='Signal: %{y:.2f}<extra></extra>'
+        ))
+        fig_macd.add_hline(y=0, line=dict(color='rgba(255,255,255,0.2)', width=1))
+        cur_macd = float(macd_line.iloc[-1])
+        cur_sig  = float(signal.iloc[-1])
+        macd_cross = "ゴールデンクロス（買いシグナル）" if cur_macd > cur_sig else "デッドクロス（売りシグナル）"
+        apply_layout(fig_macd, height=260, title='MACD（12/26/9）', yaxis_title='MACD')
+        html_macd = safe_html(fig_macd, "chart-macd")
+        print(f"  Chart 2b (MACD) OK: {macd_cross}")
+    else:
+        print("  Chart 2b (MACD): skipped (insufficient data)")
+except Exception as e:
+    print(f"  [WARN] Chart 2b (MACD): {e}")
+    traceback.print_exc()
+
 # ─── Chart 3: PER BBチャート ───
 html_per = ""
 per_pctb_now = None
@@ -1326,14 +1366,28 @@ now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M JST")
 kpi_price = f"¥{cur_price:,.0f}" if cur_price else "N/A"
 kpi_per   = fmt_num(trailing_pe, 1, "倍") if trailing_pe else (fmt_num(forward_pe, 1, "倍(FWD)") if forward_pe else "N/A")
 kpi_pbr   = fmt_num(price_to_book, 2, "倍") if price_to_book else "N/A"
-# yfinanceは日本株のdividendYieldを%形式(2.82)で返すことがある。1超なら既に%値
-if dividend_yield:
-    kpi_div = f"{dividend_yield:.2f}%" if dividend_yield > 1 else f"{dividend_yield*100:.2f}%"
-elif dividend_rate and cur_price:
+# 配当利回り: dividendRate/currentPrice が最も信頼できる
+if dividend_rate and cur_price:
     kpi_div = f"{dividend_rate/cur_price*100:.2f}%"
+elif dividend_yield:
+    # yfinanceは日本株で%形式(2.82)を返すケースがある
+    kpi_div = f"{dividend_yield:.2f}%" if dividend_yield > 1 else f"{dividend_yield*100:.2f}%"
 else:
     kpi_div = "N/A"
-kpi_roe   = fmt_pct(roe) if roe else "N/A"
+# ROE: infoにない場合は財務諸表から計算
+if roe:
+    kpi_roe = fmt_pct(roe)
+else:
+    try:
+        ni_keys = ['Net Income Common Stockholders', 'Net Income']
+        eq_keys = ['Common Stock Equity', 'Stockholders Equity']
+        ni = next((float(inc.loc[k].iloc[0]) for k in ni_keys if k in inc.index and pd.notna(inc.loc[k].iloc[0])), None)
+        eq = next((float(bs.loc[k].iloc[0]) for k in eq_keys if k in bs.index and pd.notna(bs.loc[k].iloc[0])), None)
+        kpi_roe = f"{ni/eq*100:.1f}%" if ni and eq and eq > 0 else "N/A"
+        if ni and eq and eq > 0:
+            roe = ni / eq  # サマリー評価でも使えるよう更新
+    except Exception:
+        kpi_roe = "N/A"
 kpi_target = f"¥{target_mean:,.0f}" if target_mean else "N/A"
 
 upside_str = f"（アップサイド {upside_pct:+.1f}%）" if upside_pct is not None else ""
@@ -1389,6 +1443,17 @@ if html_vol:
         "出来高チャート",
         "日次出来高",
         html_vol,
+    ))
+if html_macd:
+    try:
+        macd_insight = f"現在: MACD={cur_macd:.2f} / Signal={cur_sig:.2f} — <strong>{macd_cross}</strong>"
+    except NameError:
+        macd_insight = ""
+    body_sections.append(card(
+        "MACD（12/26/9）",
+        "EMA12 − EMA26 のモメンタム指標。MACDがシグナルを上抜けでゴールデンクロス（買い）、下抜けでデッドクロス（売り）。",
+        html_macd,
+        macd_insight,
     ))
 
 # バリュエーション
